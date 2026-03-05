@@ -41,6 +41,36 @@ namespace UnitySceneGen
         // Unity can only run one headless instance at a time — enforce that here
         private readonly SemaphoreSlim _generateLock = new(1, 1);
 
+        // ── Live status for GET /status polling ──────────────────────────────
+        private readonly object _statusLock = new();
+        private GenerationStatus _status = new();
+
+        private void StatusLog(string line)
+        {
+            lock (_statusLock) { _status.Log.Add(line); }
+            Console.WriteLine(line);
+        }
+
+        private void StatusStep(string step)
+        {
+            lock (_statusLock) { _status.Step = step; }
+        }
+
+        private GenerationStatus GetStatusSnapshot()
+        {
+            lock (_statusLock)
+            {
+                return new GenerationStatus
+                {
+                    Running = _status.Running,
+                    Step = _status.Step,
+                    Error = _status.Error,
+                    Log = new List<string>(_status.Log),
+                };
+            }
+        }
+
+
         public ApiServer(int port = DefaultPort)
         {
             _port = port;
@@ -207,6 +237,8 @@ namespace UnitySceneGen
 
             try
             {
+                lock (_statusLock) { _status = new GenerationStatus { Running = true, Step = "Starting…" }; }
+
                 // ── 1. Parse body ─────────────────────────────────────────────
                 string body;
                 using (var sr = new StreamReader(req.InputStream, req.ContentEncoding))
@@ -272,11 +304,20 @@ namespace UnitySceneGen
 
                     var logs = new List<string>();
                     var result = await Task.Run(() =>
-                        GenerationEngine.Run(opts, line => { logs.Add(line); Console.WriteLine(line); },
-                            CancellationToken.None));
+                        GenerationEngine.Run(opts, line =>
+                        {
+                            logs.Add(line);
+                            StatusLog(line);
+                            if (line.Contains("Step 1/5")) StatusStep("Step 1/5 — Validating config");
+                            else if (line.Contains("Step 2/5")) StatusStep("Step 2/5 — Setting up project");
+                            else if (line.Contains("Step 3/5")) StatusStep("Step 3/5 — Unity Pass 1 (compile)");
+                            else if (line.Contains("Step 4/5")) StatusStep("Step 4/5 — Unity Pass 2 (scene build)");
+                            else if (line.Contains("Step 5/5")) StatusStep("Step 5/5 — Writing summary");
+                        }, CancellationToken.None));
 
                     if (!result.Success)
                     {
+                        lock (_statusLock) { _status.Error = result.Error; _status.Step = "Failed"; }
                         res.StatusCode = 422;
                         await WriteJsonAsync(res, new
                         {
@@ -313,6 +354,7 @@ namespace UnitySceneGen
             } // end semaphore try
             finally
             {
+                lock (_statusLock) { _status.Running = false; }
                 _generateLock.Release();
             }
         }
@@ -502,5 +544,13 @@ namespace UnitySceneGen
   }
 }
 """;
+    }
+
+    public class GenerationStatus
+    {
+        [JsonProperty("running")] public bool Running { get; set; }
+        [JsonProperty("step")] public string Step { get; set; } = "Idle";
+        [JsonProperty("error")] public string Error { get; set; } = "";
+        [JsonProperty("log")] public List<string> Log { get; set; } = new();
     }
 }
