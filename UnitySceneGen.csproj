@@ -11,6 +11,12 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<PublishSingleFile>true</PublishSingleFile>
 		<SelfContained>false</SelfContained>
+
+		<OutputPath>bin\</OutputPath>
+		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+		<AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+		
+		
 	</PropertyGroup>
 	<ItemGroup>
 		<PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
