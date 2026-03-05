@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net6.0-windows</TargetFramework>
+		<UseWPF>true</UseWPF>
+		<UseWindowsForms>true</UseWindowsForms>
+		<AssemblyName>UnitySceneGen</AssemblyName>
+		<RootNamespace>UnitySceneGen</RootNamespace>
+		<LangVersion>11</LangVersion>
+		<Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<PublishSingleFile>true</PublishSingleFile>
+		<SelfContained>false</SelfContained>
+	</PropertyGroup>
+	<ItemGroup>
+		<PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+	</ItemGroup>
+	<ItemGroup>
+		<!-- Builder.cs embedded so the exe ships as a single file -->
+		<EmbeddedResource Include="UnityBuilder\Builder.cs"
+						  LogicalName="UnitySceneGen.UnityBuilder.Builder.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Compile Remove="UnityBuilder\Builder.cs" />
+	</ItemGroup>
+
+</Project>

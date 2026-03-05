@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36511.14 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "UnitySceneGen", "UnitySceneGen.csproj", "{F763A2A6-5C53-4C5E-8EC3-CCCA5707E27B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F763A2A6-5C53-4C5E-8EC3-CCCA5707E27B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F763A2A6-5C53-4C5E-8EC3-CCCA5707E27B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F763A2A6-5C53-4C5E-8EC3-CCCA5707E27B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F763A2A6-5C53-4C5E-8EC3-CCCA5707E27B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {D620B563-E845-4906-895D-1309D7F0F8F8}
+	EndGlobalSection
+EndGlobal
