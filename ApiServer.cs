@@ -53,10 +53,10 @@ namespace UnitySceneGen
         public void Start()
         {
             _listener.Start();
-            Console.WriteLine($"[API] Listening  →  http://localhost:{_port}/");
-            Console.WriteLine($"[API] Swagger UI →  http://localhost:{_port}/swagger");
-            Console.WriteLine($"[API] OpenAPI    →  http://localhost:{_port}/openapi.json");
-            Console.WriteLine($"[API] Generate   →  POST http://localhost:{_port}/generate");
+            Console.WriteLine($"[API] Listening  →  http://*:{_port}/");
+            Console.WriteLine($"[API] Swagger UI →  http://<your-ip>:{_port}/swagger");
+            Console.WriteLine($"[API] OpenAPI    →  http://<your-ip>:{_port}/openapi.json");
+            Console.WriteLine($"[API] Generate   →  POST http://<your-ip>:{_port}/generate");
             _ = Task.Run(() => AcceptLoop(_cts.Token));
         }
 
@@ -269,9 +269,9 @@ namespace UnitySceneGen
             defaultUnityExePath = AppSettings.DefaultUnityExePath,
             endpoints = new[]
             {
-                $"GET  http://localhost:{_port}/swagger       — Swagger UI (browser)",
-                $"GET  http://localhost:{_port}/openapi.json  — OpenAPI 3.0 spec",
-                $"POST http://localhost:{_port}/generate      — Generate project, returns .zip",
+                $"GET  http://<your-ip>:{_port}/swagger       — Swagger UI (browser)",
+                $"GET  http://<your-ip>:{_port}/openapi.json  — OpenAPI 3.0 spec",
+                $"POST http://<your-ip>:{_port}/generate      — Generate project, returns .zip",
             },
         };
 
