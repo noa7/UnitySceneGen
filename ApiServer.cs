@@ -45,7 +45,7 @@ namespace UnitySceneGen
         {
             _port = port;
             _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://localhost:{port}/");
+            _listener.Prefixes.Add($"http://*:{port}/");
         }
 
         // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -330,7 +330,7 @@ namespace UnitySceneGen
     "description": "Generate a complete Unity project from a JSON scene config and receive it as a ZIP archive.\n\n**Default Unity path:** `{{AppSettings.DefaultUnityExePath.Replace("\\", "\\\\")}}`\n\nOmit `unityExePath` from the request body to use this default.\n\n**Note:** `POST /generate` runs the full Unity headless pipeline (Pass 1 + Pass 2) and may take 5–20 minutes. Keep client timeouts high accordingly.",
     "version": "1.0.0"
   },
-  "servers": [{ "url": "http://localhost:{{_port}}", "description": "Local UnitySceneGen server" }],
+  "servers": [{ "url": "/", "description": "UnitySceneGen server" }],
   "paths": {
     "/swagger": {
       "get": {
