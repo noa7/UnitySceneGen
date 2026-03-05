@@ -45,7 +45,7 @@ namespace UnitySceneGen
         {
             _port = port;
             _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://*:{port}/");
+            _listener.Prefixes.Add($"http://localhost:{port}/");
         }
 
         // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -292,7 +292,7 @@ namespace UnitySceneGen
 <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
 <script>
   SwaggerUIBundle({
-    url:            "http://localhost:{{_port}}/openapi.json",
+    url:            "/openapi.json",
     dom_id:         "#swagger-ui",
     presets:        [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
     layout:         "StandaloneLayout",
