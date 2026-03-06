@@ -436,10 +436,38 @@ namespace UnitySceneGen
                     var editorDir = Path.Combine(projectPath, "Assets", "Editor");
                     Directory.CreateDirectory(editorDir);
 
-                    string buildOut = Path.Combine(projectPath, "Builds", "WebGL").Replace("\\", "/");
+                    string buildOut = Path.Combine(projectPath, "Builds", "WebGL").Replace("\\\\", "/");
+                    string buildOutForScript = buildOut; // forward slashes already applied
                     string devFlag = development ? "BuildOptions.Development" : "BuildOptions.None";
 
-                    // Build the script using string.Replace to avoid interpolation escaping issues
+                    // ── Inject TmpImporter.cs — auto-imports TMP Essentials before build ──
+                    StatusStep("Build: injecting TMP importer…");
+                    string tmpImporterScript =
+                        "using UnityEditor;\n" +
+                        "using UnityEngine;\n" +
+                        "using TMPro.EditorUtilities;\n\n" +
+                        "[InitializeOnLoad]\n" +
+                        "public static class TmpAutoImporter\n" +
+                        "{\n" +
+                        "    static TmpAutoImporter()\n" +
+                        "    {\n" +
+                        "        // Only import if TMP Essentials are not already present\n" +
+                        "        if (!System.IO.Directory.Exists(\"Assets/TextMesh Pro\"))\n" +
+                        "        {\n" +
+                        "            Debug.Log(\"[TmpAutoImporter] Importing TMP Essentials…\");\n" +
+                        "            TMP_PackageUtilities.ImportProjectResourcesMenu();\n" +
+                        "        }\n" +
+                        "        else\n" +
+                        "        {\n" +
+                        "            Debug.Log(\"[TmpAutoImporter] TMP Essentials already present — skipping.\");\n" +
+                        "        }\n" +
+                        "    }\n" +
+                        "}\n";
+                    await File.WriteAllTextAsync(Path.Combine(editorDir, "TmpAutoImporter.cs"), tmpImporterScript);
+                    StatusLog("[Build] TmpAutoImporter.cs injected.");
+
+                    // ── Inject WebGLBuilder.cs ─────────────────────────────────────────────
+                    // Build the script using string concatenation to avoid interpolation escaping issues
                     string builderScript =
                         "using UnityEditor;\n" +
                         "using UnityEngine;\n" +
@@ -459,8 +487,8 @@ namespace UnitySceneGen
                         "            scenes.Add(f.Replace(\"\\\\\", \"/\"));\n\n" +
                         "        if (scenes.Count == 0) { Debug.LogError(\"WebGLBuilder: no .unity scenes found\"); return; }\n" +
                         "        foreach (var s in scenes) Debug.Log(\"[Build] Scene: \" + s);\n\n" +
-                        $"        string outPath = \"{buildOut.Replace("\\", "/")}\";\n" +
-                        $"        BuildOptions buildOpts = {devFlag};\n" +
+                        $"        string outPath = \"{buildOutForScript}\";" + "\n" +
+                        $"        BuildOptions buildOpts = {devFlag};" + "\n" +
                         "        var report = BuildPipeline.BuildPlayer(scenes.ToArray(), outPath, BuildTarget.WebGL, buildOpts);\n" +
                         "        Debug.Log(\"[Build] Result: \" + report.summary.result);\n" +
                         "        Debug.Log(\"[Build] Output: \" + outPath);\n" +
@@ -581,8 +609,7 @@ namespace UnitySceneGen
                                 using var sr = new StreamReader(fs);
                                 var text = sr.ReadToEnd();
                                 lastSize = fs.Length;
-                                foreach (var line in text.Split('
-'))
+                                foreach (var line in text.Split('\n'))
                                 {
                                     var t = line.Trim();
                                     if (t.Length > 0) StatusLog($"  [Unity] {t}");
