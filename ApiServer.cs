@@ -1,13 +1,15 @@
-﻿using System;
+﻿using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using UnitySceneGen.Core;
 
 namespace UnitySceneGen
@@ -151,6 +153,7 @@ namespace UnitySceneGen
                         }
                     case ("POST", "/validate"): await HandleValidateAsync(req, res); break;
                     case ("POST", "/generate"): await HandleGenerateAsync(req, res); break;
+                    case ("POST", "/build"): await HandleBuildAsync(req, res); break;
                     default:
                         res.StatusCode = 404;
                         await WriteJsonAsync(res, new { error = $"No route: {req.HttpMethod} {path}" });
@@ -357,6 +360,308 @@ namespace UnitySceneGen
                 lock (_statusLock) { _status.Running = false; }
                 _generateLock.Release();
             }
+        }
+
+        // ── POST /build ──────────────────────────────────────────────────────────
+        // Accepts a ZIP of the Unity project source, builds WebGL, uploads to GCS,
+        // returns { success, url, warnings[], log[] }. Streams via GET /status.
+
+        private async Task HandleBuildAsync(HttpListenerRequest req, HttpListenerResponse res)
+        {
+            if (!await _generateLock.WaitAsync(0))
+            {
+                res.StatusCode = 503;
+                await WriteJsonAsync(res, new { error = "A job is already running.", status = "busy" });
+                return;
+            }
+
+            try
+            {
+                lock (_statusLock) { _status = new GenerationStatus { Running = true, Step = "Build: receiving source…" }; }
+
+                // ── 1. Read request body (JSON) ───────────────────────────────
+                string body;
+                using (var sr = new StreamReader(req.InputStream, req.ContentEncoding))
+                    body = await sr.ReadToEndAsync();
+
+                JObject? apiReq;
+                try { apiReq = JObject.Parse(body); }
+                catch (Exception ex)
+                {
+                    res.StatusCode = 400;
+                    await WriteJsonAsync(res, new { error = $"Bad JSON: {ex.Message}" });
+                    return;
+                }
+
+                // Expect: { "projectZipBase64": "...", "projectName": "...", "unityExePath": "..." }
+                string? zipBase64 = apiReq?["projectZipBase64"]?.Value<string>();
+                string? projectName = apiReq?["projectName"]?.Value<string>();
+                string? unityExe = apiReq?["unityExePath"]?.Value<string>();
+                string? gcsBucket = apiReq?["gcsBucket"]?.Value<string>() ?? "aqe-unity-builds";
+                string? gcsKeyJson = apiReq?["gcsKeyJson"]?.Value<string>(); // base64 service account JSON
+                bool development = apiReq?["development"]?.Value<bool>() ?? false;
+
+                if (string.IsNullOrWhiteSpace(zipBase64)) { res.StatusCode = 400; await WriteJsonAsync(res, new { error = "projectZipBase64 is required." }); return; }
+                if (string.IsNullOrWhiteSpace(projectName)) { res.StatusCode = 400; await WriteJsonAsync(res, new { error = "projectName is required." }); return; }
+
+                unityExe = string.IsNullOrWhiteSpace(unityExe) ? AppSettings.DefaultUnityExePath : unityExe;
+                if (!File.Exists(unityExe)) { res.StatusCode = 400; await WriteJsonAsync(res, new { error = $"Unity not found: {unityExe}" }); return; }
+
+                // ── 2. Unzip project to temp folder ───────────────────────────
+                var sessionDir = Path.Combine(Path.GetTempPath(), $"UnityBuild_{Guid.NewGuid():N}");
+                var projectPath = Path.Combine(sessionDir, projectName);
+                StatusLog($"[Build] Session dir: {sessionDir}");
+
+                try
+                {
+                    Directory.CreateDirectory(sessionDir);
+                    var zipBytes = Convert.FromBase64String(zipBase64);
+                    var tempZip = Path.Combine(sessionDir, "source.zip");
+                    await File.WriteAllBytesAsync(tempZip, zipBytes);
+
+                    StatusLog($"[Build] Extracting source ZIP ({zipBytes.Length / 1024:N0} KB)…");
+                    StatusStep("Build: extracting source…");
+                    System.IO.Compression.ZipFile.ExtractToDirectory(tempZip, sessionDir, overwriteFiles: true);
+
+                    if (!Directory.Exists(projectPath))
+                    {
+                        // ZIP may have been created without the project subfolder — try direct extract
+                        projectPath = sessionDir;
+                    }
+
+                    StatusLog($"[Build] Project path: {projectPath}");
+
+                    // ── 3. Inject WebGLBuilder.cs ─────────────────────────────
+                    StatusStep("Build: injecting build script…");
+                    var editorDir = Path.Combine(projectPath, "Assets", "Editor");
+                    Directory.CreateDirectory(editorDir);
+
+                    string buildOut = Path.Combine(projectPath, "Builds", "WebGL").Replace("\\", "/");
+                    string devFlag = development ? "BuildOptions.Development" : "BuildOptions.None";
+
+                    // Build the script using string.Replace to avoid interpolation escaping issues
+                    string builderScript =
+                        "using UnityEditor;\n" +
+                        "using UnityEngine;\n" +
+                        "using System.IO;\n" +
+                        "using System.Collections.Generic;\n\n" +
+                        "public class WebGLBuilder\n" +
+                        "{\n" +
+                        "    public static void Build()\n" +
+                        "    {\n" +
+                        "        EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.WebGL, BuildTarget.WebGL);\n" +
+                        "        PlayerSettings.WebGL.memorySize = 1024;\n" +
+                        "        PlayerSettings.WebGL.compressionFormat = WebGLCompressionFormat.Disabled;\n" +
+                        "        PlayerSettings.WebGL.dataCaching = true;\n" +
+                        "        PlayerSettings.WebGL.decompressionFallback = true;\n\n" +
+                        "        var scenes = new List<string>();\n" +
+                        "        foreach (var f in Directory.GetFiles(\"Assets\", \"*.unity\", SearchOption.AllDirectories))\n" +
+                        "            scenes.Add(f.Replace(\"\\\\\", \"/\"));\n\n" +
+                        "        if (scenes.Count == 0) { Debug.LogError(\"WebGLBuilder: no .unity scenes found\"); return; }\n" +
+                        "        foreach (var s in scenes) Debug.Log(\"[Build] Scene: \" + s);\n\n" +
+                        $"        string outPath = \"{buildOut.Replace("\\", "/")}\";\n" +
+                        $"        BuildOptions buildOpts = {devFlag};\n" +
+                        "        var report = BuildPipeline.BuildPlayer(scenes.ToArray(), outPath, BuildTarget.WebGL, buildOpts);\n" +
+                        "        Debug.Log(\"[Build] Result: \" + report.summary.result);\n" +
+                        "        Debug.Log(\"[Build] Output: \" + outPath);\n" +
+                        "        Debug.Log(\"[Build] Errors: \" + report.summary.totalErrors);\n" +
+                        "    }\n" +
+                        "}\n";
+                    await File.WriteAllTextAsync(Path.Combine(editorDir, "WebGLBuilder.cs"), builderScript);
+                    StatusLog("[Build] WebGLBuilder.cs injected.");
+
+                    // ── 4. Run Unity build pass ───────────────────────────────
+                    StatusStep("Build: Unity building WebGL…");
+                    StatusLog("[Build] Starting Unity WebGL build…");
+
+                    var buildLogFile = Path.Combine(sessionDir, "UnityBuild.log");
+                    var unityArgs = $"-batchmode -quit -nographics -projectPath \"{projectPath}\" -executeMethod WebGLBuilder.Build -logFile \"{buildLogFile}\"";
+
+                    StatusLog($"[Build] Unity: {unityExe}");
+                    StatusLog($"[Build] Args : {unityArgs}");
+
+                    var buildResult = await RunUnityBuildAsync(unityExe, unityArgs, buildLogFile,
+                        TimeSpan.FromMinutes(20), CancellationToken.None);
+
+                    if (!buildResult.ok)
+                    {
+                        lock (_statusLock) { _status.Step = "Build: FAILED"; _status.Error = buildResult.error; }
+                        res.StatusCode = 422;
+                        await WriteJsonAsync(res, new { success = false, error = buildResult.error, log = _status.Log });
+                        return;
+                    }
+
+                    string buildOutAbs = Path.Combine(projectPath, "Builds", "WebGL");
+                    if (!Directory.Exists(buildOutAbs))
+                    {
+                        var err = $"Build succeeded but output folder not found: {buildOutAbs}";
+                        lock (_statusLock) { _status.Step = "Build: FAILED"; _status.Error = err; }
+                        res.StatusCode = 422;
+                        await WriteJsonAsync(res, new { success = false, error = err, log = _status.Log });
+                        return;
+                    }
+
+                    StatusLog($"[Build] ✓ WebGL build complete: {buildOutAbs}");
+
+                    // ── 5. Upload to GCS if key provided ─────────────────────
+                    string publicUrl = "";
+                    if (!string.IsNullOrWhiteSpace(gcsKeyJson) && !string.IsNullOrWhiteSpace(gcsBucket))
+                    {
+                        StatusStep("Build: uploading to GCS…");
+                        StatusLog($"[Build] Uploading to gs://{gcsBucket}/{projectName}/");
+
+                        var keyBytes = Convert.FromBase64String(gcsKeyJson);
+                        var tempKey = Path.Combine(sessionDir, "svc.json");
+                        await File.WriteAllBytesAsync(tempKey, keyBytes);
+
+                        var gcsResult = await UploadBuildToGcsAsync(buildOutAbs, gcsBucket, projectName, tempKey);
+                        publicUrl = gcsResult;
+                        StatusLog($"[Build] ✓ Uploaded. URL: {publicUrl}");
+                    }
+                    else
+                    {
+                        StatusLog("[Build] No GCS key provided — skipping upload.");
+                    }
+
+                    StatusStep("Build: complete ✓");
+                    lock (_statusLock) { _status.Running = false; }
+
+                    res.StatusCode = 200;
+                    await WriteJsonAsync(res, new
+                    {
+                        success = true,
+                        url = publicUrl,
+                        warnings = new List<string>(),
+                        log = _status.Log,
+                    });
+                }
+                finally
+                {
+                    try { Directory.Delete(sessionDir, recursive: true); } catch { }
+                }
+            }
+            finally
+            {
+                lock (_statusLock) { _status.Running = false; }
+                _generateLock.Release();
+            }
+        }
+
+        // Runs Unity as a child process, tails the log file into StatusLog
+        private async Task<(bool ok, string error)> RunUnityBuildAsync(
+            string exe, string args, string logFile, TimeSpan timeout, CancellationToken ct)
+        {
+            var psi = new ProcessStartInfo(exe, args)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            using var proc = Process.Start(psi)
+                ?? throw new InvalidOperationException("Failed to start Unity process.");
+
+            StatusLog($"[Build] Unity PID {proc.Id}");
+
+            var tailCts = new CancellationTokenSource();
+            long lastSize = 0;
+
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(2000);
+                while (!tailCts.Token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        if (File.Exists(logFile))
+                        {
+                            using var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                            if (fs.Length > lastSize)
+                            {
+                                fs.Seek(lastSize, SeekOrigin.Begin);
+                                using var sr = new StreamReader(fs);
+                                var text = sr.ReadToEnd();
+                                lastSize = fs.Length;
+                                foreach (var line in text.Split('
+'))
+                                {
+                                    var t = line.Trim();
+                                    if (t.Length > 0) StatusLog($"  [Unity] {t}");
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                    await Task.Delay(800);
+                }
+            });
+
+            var deadline = DateTime.UtcNow + timeout;
+            while (!proc.HasExited)
+            {
+                if (DateTime.UtcNow > deadline)
+                {
+                    try { proc.Kill(true); } catch { }
+                    tailCts.Cancel();
+                    return (false, $"Unity build timed out after {timeout.TotalMinutes:F0} min.");
+                }
+                await Task.Delay(1000);
+            }
+
+            tailCts.Cancel();
+            await Task.Delay(600);
+
+            int exit = proc.ExitCode;
+            StatusLog($"[Build] Unity exited: {exit}");
+
+            if (File.Exists(logFile))
+            {
+                var log = File.ReadAllText(logFile);
+                if (log.Contains("Build FAILED", StringComparison.OrdinalIgnoreCase) ||
+                    log.Contains("Error building Player", StringComparison.OrdinalIgnoreCase))
+                    return (false, "Unity build failed — check log.");
+            }
+
+            return (exit == 0, exit == 0 ? "" : $"Unity exited with code {exit}");
+        }
+
+        // Upload WebGL build folder to GCS, returns public URL of index.html
+        private async Task<string> UploadBuildToGcsAsync(
+            string buildFolder, string bucket, string projectName, string keyFilePath)
+        {
+            // Use gsutil via process — avoids needing GCS SDK on the server
+            // Falls back to a simple HTTP PUT loop if gsutil not available
+            var files = Directory.EnumerateFiles(buildFolder, "*", SearchOption.AllDirectories).ToList();
+            StatusLog($"[GCS] {files.Count} files to upload");
+
+            // Try gsutil rsync
+            var gsutil = "gsutil";
+            var gsArgs = $"-m cp -r \"{buildFolder}\" \"gs://{bucket}/{projectName}/\"";
+
+            var psi = new ProcessStartInfo(gsutil, gsArgs)
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                Environment = { ["GOOGLE_APPLICATION_CREDENTIALS"] = keyFilePath }
+            };
+
+            try
+            {
+                using var p = Process.Start(psi)!;
+                p.OutputDataReceived += (_, e) => { if (e.Data != null) StatusLog($"  [gsutil] {e.Data}"); };
+                p.ErrorDataReceived += (_, e) => { if (e.Data != null) StatusLog($"  [gsutil] {e.Data}"); };
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+                p.WaitForExit();
+                StatusLog($"[GCS] gsutil exit: {p.ExitCode}");
+            }
+            catch (Exception ex)
+            {
+                StatusLog($"[GCS] gsutil not available: {ex.Message}. Upload skipped.");
+            }
+
+            return $"https://storage.googleapis.com/{bucket}/{projectName}/index.html";
         }
 
         private object RootInfo() => new
