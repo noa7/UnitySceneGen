@@ -7,17 +7,24 @@ namespace UnitySceneGen.Core
     public class AppSettings
     {
         /// <summary>
-        /// Fallback Unity.exe path used when no path has been saved and
-        /// none is supplied by the caller. Shared by WPF, CLI and API.
+        /// Default Unity.exe path. Used when no path is saved and none is supplied by the caller.
+        /// Shared by GUI and API server.
         /// </summary>
         public const string DefaultUnityExePath =
             @"C:\Program Files\Unity\Hub\Editor\6000.0.3f1\Editor\Unity.exe";
 
-        public string? LastConfigPath { get; set; }
-        public string? LastUnityExePath { get; set; }
-        public string? LastOutputPath { get; set; }
-        public bool ForceMode { get; set; }
-        public int LastConfigTab { get; set; }  // 0 = File, 1 = Inline JSON
+        // ── Persisted fields ──────────────────────────────────────────
+
+        /// <summary>Last scene.zip path used in the GUI.</summary>
+        public string? LastZipPath       { get; set; }
+
+        /// <summary>Last Unity.exe path used.</summary>
+        public string? LastUnityExePath  { get; set; }
+
+        /// <summary>Last output directory used.</summary>
+        public string? LastOutputDir     { get; set; }
+
+        // ── Persistence ───────────────────────────────────────────────
 
         private static string SettingsPath =>
             Path.Combine(
@@ -36,15 +43,18 @@ namespace UnitySceneGen.Core
             return new AppSettings();
         }
 
-        public static void Save(AppSettings s)
+        public void Save()
         {
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
                 File.WriteAllText(SettingsPath,
-                    JsonConvert.SerializeObject(s, Formatting.Indented));
+                    JsonConvert.SerializeObject(this, Formatting.Indented));
             }
             catch { }
         }
+
+        // Keep static overload for any callers that pass an instance
+        public static void Save(AppSettings s) => s.Save();
     }
 }

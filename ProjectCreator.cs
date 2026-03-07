@@ -9,10 +9,21 @@ namespace UnitySceneGen
 {
     public static class ProjectCreator
     {
+        /// <summary>
+        /// Creates or verifies the Unity project folder and writes all generated files.
+        /// </summary>
+        /// <param name="cfg">The fully-loaded and template-resolved config.</param>
+        /// <param name="outputDir">Parent directory — project folder is created inside here.</param>
+        /// <param name="configDir">
+        /// Directory containing the original config or manifest file.
+        /// Used to resolve relative script File paths.
+        /// </param>
+        /// <param name="force">When true, deletes and recreates the project folder.</param>
+        /// <param name="log">Log sink.</param>
         public static string CreateOrVerify(
             SceneGenConfig cfg,
             string outputDir,
-            string configPath,
+            string configDir,
             bool force,
             Action<string> log)
         {
@@ -41,10 +52,10 @@ namespace UnitySceneGen
                 log($"[ProjectCreator] Reusing existing project at {projectRoot}");
             }
 
-            // Always refresh builder script, user scripts, and config so changes take effect
+            // Always refresh these so changes take effect on re-runs
             WriteBuilderScript(projectRoot, log);
-            WriteScripts(cfg, projectRoot, log);
-            CopyConfig(configPath, projectRoot, log);
+            WriteScripts(cfg, projectRoot, configDir, log);
+            WriteConfig(cfg, projectRoot, log);   // serialise merged config (not original file)
 
             return projectRoot;
         }
@@ -73,47 +84,106 @@ namespace UnitySceneGen
                 log($"  mkdir {d}");
             }
 
-            // ProjectVersion.txt — tells Unity which editor version owns this project
             File.WriteAllText(
                 Path.Combine(root, "ProjectSettings", "ProjectVersion.txt"),
                 $"m_EditorVersion: {unityVersion}\n");
 
-            WriteManifest(root, cfg, log);
+            WritePackageManifest(root, cfg, log);
         }
 
-        private static void WriteManifest(string root, SceneGenConfig cfg, Action<string> log)
-        {
-            var deps = new Dictionary<string, string>
+        // ── All 31 Unity built-in modules — used when scene.json specifies none ──
+        // These are always available in every Unity install and are zero-cost to include.
+        private static readonly Dictionary<string, string> AllBuiltinModules =
+            new Dictionary<string, string>
             {
+                ["com.unity.modules.accessibility"] = "1.0.0",
                 ["com.unity.modules.ai"] = "1.0.0",
+                ["com.unity.modules.androidjni"] = "1.0.0",
                 ["com.unity.modules.animation"] = "1.0.0",
+                ["com.unity.modules.assetbundle"] = "1.0.0",
                 ["com.unity.modules.audio"] = "1.0.0",
+                ["com.unity.modules.cloth"] = "1.0.0",
+                ["com.unity.modules.director"] = "1.0.0",
+                ["com.unity.modules.imageconversion"] = "1.0.0",
                 ["com.unity.modules.imgui"] = "1.0.0",
+                ["com.unity.modules.jsonserialize"] = "1.0.0",
+                ["com.unity.modules.particlesystem"] = "1.0.0",
                 ["com.unity.modules.physics"] = "1.0.0",
+                ["com.unity.modules.physics2d"] = "1.0.0",
+                ["com.unity.modules.screencapture"] = "1.0.0",
+                ["com.unity.modules.terrain"] = "1.0.0",
+                ["com.unity.modules.terrainphysics"] = "1.0.0",
+                ["com.unity.modules.tilemap"] = "1.0.0",
                 ["com.unity.modules.ui"] = "1.0.0",
+                ["com.unity.modules.uielements"] = "1.0.0",
+                ["com.unity.modules.umbra"] = "1.0.0",
                 ["com.unity.modules.unityanalytics"] = "1.0.0",
-                ["com.unity.ugui"] = "1.0.0",
-                ["com.unity.textmeshpro"] = "3.0.6",
-                ["com.unity.nuget.newtonsoft-json"] = "3.2.1",
+                ["com.unity.modules.unitywebrequest"] = "1.0.0",
+                ["com.unity.modules.unitywebrequestassetbundle"] = "1.0.0",
+                ["com.unity.modules.unitywebrequestaudio"] = "1.0.0",
+                ["com.unity.modules.unitywebrequesttexture"] = "1.0.0",
+                ["com.unity.modules.unitywebrequestwww"] = "1.0.0",
+                ["com.unity.modules.vehicles"] = "1.0.0",
+                ["com.unity.modules.video"] = "1.0.0",
+                ["com.unity.modules.vr"] = "1.0.0",
+                ["com.unity.modules.wind"] = "1.0.0",
+                ["com.unity.modules.xr"] = "1.0.0",
             };
 
-            if (cfg.Project?.Packages != null)
-                foreach (var pkg in cfg.Project.Packages)
-                {
-                    var parts = pkg.Split('@');
-                    deps[parts[0]] = parts.Length > 1 ? parts[1] : "1.0.0";
-                }
+        private static void WritePackageManifest(
+            string root, SceneGenConfig cfg, Action<string> log)
+        {
+            var userPackages = cfg.Project?.Packages ?? new List<string>();
+
+            // Separate what the project declared into modules vs registry packages
+            var declaredModules = new Dictionary<string, string>();
+            var registryPackages = new Dictionary<string, string>();
+
+            foreach (var pkg in userPackages)
+            {
+                var parts = pkg.Split('@');
+                var name = parts[0].Trim();
+                var version = parts.Length > 1 ? parts[1].Trim() : "1.0.0";
+
+                if (name.StartsWith("com.unity.modules.", StringComparison.OrdinalIgnoreCase))
+                    declaredModules[name] = version;
+                else
+                    registryPackages[name] = version;
+            }
+
+            // ── Module policy ─────────────────────────────────────────
+            // If the project declared any modules explicitly → use exactly those.
+            // If none declared → include all 31 built-ins so any script compiles.
+            var modules = declaredModules.Count > 0
+                ? declaredModules
+                : new Dictionary<string, string>(AllBuiltinModules);
+
+            string moduleSource = declaredModules.Count > 0
+                ? $"{declaredModules.Count} explicit"
+                : $"all {AllBuiltinModules.Count} (default — none declared in scene.json)";
+
+            // ── Always-present registry packages ──────────────────────
+            // ugui and newtonsoft-json are required by the builder itself.
+            registryPackages.TryAdd("com.unity.ugui", "1.0.0");
+            registryPackages.TryAdd("com.unity.nuget.newtonsoft-json", "3.2.1");
+
+            // ── Merge and write ───────────────────────────────────────
+            var deps = new Dictionary<string, string>(modules);
+            foreach (var kv in registryPackages)
+                deps[kv.Key] = kv.Value;
 
             File.WriteAllText(
                 Path.Combine(root, "Packages", "manifest.json"),
                 JsonConvert.SerializeObject(new { dependencies = deps }, Formatting.Indented));
 
-            log($"  manifest.json — {deps.Count} packages");
+            log($"  Packages/manifest.json — {deps.Count} packages " +
+                $"(modules: {moduleSource}, registry: {registryPackages.Count})");
         }
 
-        // ── User scripts ──────────────────────────────────────────────
+        // ── Scripts ───────────────────────────────────────────────────
 
-        private static void WriteScripts(SceneGenConfig cfg, string root, Action<string> log)
+        private static void WriteScripts(
+            SceneGenConfig cfg, string root, string configDir, Action<string> log)
         {
             if (cfg.Scripts == null || cfg.Scripts.Count == 0) return;
 
@@ -128,16 +198,37 @@ namespace UnitySceneGen
                     continue;
                 }
 
-                var src = GenerateScriptSource(script);
                 var dest = Path.Combine(dir, $"{script.Name}.cs");
-                File.WriteAllText(dest, src);
-                log($"[ProjectCreator] Script → {dest}");
+
+                if (!string.IsNullOrWhiteSpace(script.File))
+                {
+                    // ── External .cs file — copy directly, no wrapping ──────
+                    // Resolve relative paths against configDir
+                    var sourcePath = Path.IsPathRooted(script.File)
+                        ? script.File
+                        : Path.GetFullPath(Path.Combine(configDir, script.File));
+
+                    if (!File.Exists(sourcePath))
+                        throw new FileNotFoundException(
+                            $"Script file not found: '{sourcePath}' " +
+                            $"(from '{script.File}' for script '{script.Name}')");
+
+                    File.Copy(sourcePath, dest, overwrite: true);
+                    log($"[ProjectCreator] Script (file)      → {dest}");
+                }
+                else
+                {
+                    // ── Inline body — generate MonoBehaviour wrapper ─────────
+                    var src = GenerateScriptSource(script);
+                    File.WriteAllText(dest, src);
+                    log($"[ProjectCreator] Script (generated)  → {dest}");
+                }
             }
         }
 
         /// <summary>
         /// Wraps the user-supplied class body in a proper MonoBehaviour file.
-        /// If the body is empty the generated class has stub Start/Update methods.
+        /// If body is empty the generated class has stub Start/Update methods.
         /// </summary>
         private static string GenerateScriptSource(ScriptConfig script)
         {
@@ -162,6 +253,21 @@ namespace UnitySceneGen
             return classBlock;
         }
 
+        // ── Config ────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Writes the merged, template-resolved SceneGenConfig as SceneGenConfig.json
+        /// in the project root. Unity's Builder.cs reads this file — it must contain
+        /// the fully-expanded config, not the original manifest.
+        /// </summary>
+        private static void WriteConfig(SceneGenConfig cfg, string root, Action<string> log)
+        {
+            var dest = Path.Combine(root, "SceneGenConfig.json");
+            File.WriteAllText(dest,
+                JsonConvert.SerializeObject(cfg, Formatting.Indented));
+            log($"[ProjectCreator] SceneGenConfig.json → {dest}");
+        }
+
         // ── Builder script ────────────────────────────────────────────
 
         private static void WriteBuilderScript(string root, Action<string> log)
@@ -175,13 +281,6 @@ namespace UnitySceneGen
             log($"[ProjectCreator] Builder.cs → {dest}");
         }
 
-        private static void CopyConfig(string configPath, string root, Action<string> log)
-        {
-            var dest = Path.Combine(root, "SceneGenConfig.json");
-            File.Copy(configPath, dest, overwrite: true);
-            log($"[ProjectCreator] Config → {dest}");
-        }
-
         private static string ExtractBuilderSource()
         {
             const string resource = "UnitySceneGen.UnityBuilder.Builder.cs";
@@ -192,7 +291,6 @@ namespace UnitySceneGen
                 using (var sr = new StreamReader(stream))
                     return sr.ReadToEnd();
 
-            // Dev fallback: Builder.cs next to the exe
             var adjacent = Path.Combine(
                 Path.GetDirectoryName(asm.Location)!, "Builder.cs");
             if (File.Exists(adjacent))

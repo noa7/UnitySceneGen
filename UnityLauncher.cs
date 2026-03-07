@@ -12,12 +12,12 @@ namespace UnitySceneGen
     public static class UnityLauncher
     {
         // ── Timeouts ──────────────────────────────────────────────────
-        private static readonly TimeSpan Pass1Timeout     = TimeSpan.FromMinutes(12);
-        private static readonly TimeSpan Pass2Timeout     = TimeSpan.FromMinutes(8);
+        private static readonly TimeSpan Pass1Timeout = TimeSpan.FromMinutes(12);
+        private static readonly TimeSpan Pass2Timeout = TimeSpan.FromMinutes(8);
         private static readonly TimeSpan HangDetectWindow = TimeSpan.FromSeconds(120);
 
         // ── Sentinel filenames ────────────────────────────────────────
-        private const string ResultFile  = "SceneGenResult.json";
+        private const string ResultFile = "SceneGenResult.json";
         private const string RunningFile = "SceneGenRunning.json";
 
         // ─────────────────────────────────────────────────────────────
@@ -29,13 +29,16 @@ namespace UnitySceneGen
         {
             log("[Unity Pass 1] Starting — package import & script compilation…");
             var logFile = Path.Combine(projectPath, "SceneGenUnity_Pass1.log");
-            var args    = BuildArgs(projectPath, logFile, executeMethod: null);
+            var args = BuildArgs(projectPath, logFile, executeMethod: null);
 
+            // Unity 6 exits with code 1 even on successful compilation.
+            // Pass 1 success = absence of failure patterns, not presence of success string.
             return await RunUnityAsync(unityExe, args, logFile,
                 Pass1Timeout, log, ct,
-                successPattern:  "Exiting batchmode",
+                successPattern: null,
                 failurePatterns: new[] { "compilation errors", "Error building Player",
-                                         "Failed to compile", "Scripts have compile errors" });
+                                         "Failed to compile", "Scripts have compile errors",
+                                         "error CS" });
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -51,12 +54,12 @@ namespace UnitySceneGen
             TryDelete(Path.Combine(projectPath, RunningFile));
 
             var logFile = Path.Combine(projectPath, "SceneGenUnity_Pass2.log");
-            var args    = BuildArgs(projectPath, logFile,
+            var args = BuildArgs(projectPath, logFile,
                                     executeMethod: "UnitySceneGen.Builder.Run");
 
             var (ok, error) = await RunUnityAsync(unityExe, args, logFile,
                 Pass2Timeout, log, ct,
-                successPattern:  "Exiting batchmode",
+                successPattern: "Exiting batchmode",
                 failurePatterns: new[] { "compilation errors", "Scripts have compile errors" });
 
             // Read sentinel regardless of exit code — Unity's is unreliable
@@ -97,8 +100,8 @@ namespace UnitySceneGen
 
             var psi = new ProcessStartInfo(exe, args)
             {
-                UseShellExecute  = false,
-                CreateNoWindow   = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
             };
 
             using var proc = Process.Start(psi)
@@ -107,9 +110,9 @@ namespace UnitySceneGen
             log($"[Unity] PID {proc.Id} started.");
 
             // ── Log tail task ─────────────────────────────────────────
-            var tailCts      = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var tailCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var lastActivity = DateTime.UtcNow;
-            long lastSize    = 0;
+            long lastSize = 0;
 
             _ = Task.Run(async () =>
             {
@@ -128,8 +131,8 @@ namespace UnitySceneGen
                             {
                                 fs.Seek(lastSize, SeekOrigin.Begin);
                                 using var sr = new StreamReader(fs);
-                                var newText  = sr.ReadToEnd();
-                                lastSize     = fs.Length;
+                                var newText = sr.ReadToEnd();
+                                lastSize = fs.Length;
                                 lastActivity = DateTime.UtcNow;
 
                                 foreach (var line in newText.Split('\n'))
@@ -147,9 +150,9 @@ namespace UnitySceneGen
             }, tailCts.Token);
 
             // ── Wait loop with timeout + hang detection ───────────────
-            var deadline   = DateTime.UtcNow + timeout;
-            bool timedOut  = false;
-            bool hangKill  = false;
+            var deadline = DateTime.UtcNow + timeout;
+            bool timedOut = false;
+            bool hangKill = false;
 
             while (!proc.HasExited)
             {
@@ -187,8 +190,8 @@ namespace UnitySceneGen
             int exitCode = (timedOut || hangKill) ? -1 : proc.ExitCode;
             log($"[Unity] Process ended — exit code {exitCode}");
 
-            if (timedOut)  return (false, $"Unity timed out after {timeout.TotalMinutes:F0} min.");
-            if (hangKill)  return (false, "Unity stopped producing output (license/hang).");
+            if (timedOut) return (false, $"Unity timed out after {timeout.TotalMinutes:F0} min.");
+            if (hangKill) return (false, "Unity stopped producing output (license/hang).");
 
             // Scan log for fatal patterns
             if (File.Exists(logFile))
@@ -205,7 +208,14 @@ namespace UnitySceneGen
                     return (false, $"Unity exited {exitCode} without success pattern.");
             }
 
-            return (exitCode == 0, exitCode == 0 ? "" : $"Unity exited with code {exitCode}");
+            // If no success pattern is required and no failure patterns were found,
+            // treat the run as successful even if Unity exited with a non-zero code.
+            // Unity 6 regularly exits with code 1 on success in batchmode.
+            bool hasSuccessPattern = successPattern == null
+                || (File.Exists(logFile) && ReadSafe(logFile)
+                        .IndexOf(successPattern, StringComparison.OrdinalIgnoreCase) >= 0);
+            bool clean = (exitCode == 0 || exitCode == 1) && hasSuccessPattern;
+            return (clean, clean ? "" : $"Unity exited with code {exitCode}");
         }
 
         // ── Helpers ───────────────────────────────────────────────────
