@@ -16,8 +16,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 using Microsoft.Win32;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -28,6 +26,8 @@ using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -50,10 +50,10 @@ namespace UnitySceneGen
     /// </summary>
     public class SceneGenConfig
     {
-        [JsonProperty("project")] public ProjectConfig? Project { get; set; }
-        [JsonProperty("settings")] public SettingsConfig? Settings { get; set; }
-        [JsonProperty("scenes")] public List<SceneConfig> Scenes { get; set; } = new();
-        [JsonProperty("gameObjects")] public List<GameObjectConfig> GameObjects { get; set; } = new();
+        [JsonPropertyName("project")] public ProjectConfig? Project { get; set; }
+        [JsonPropertyName("settings")] public SettingsConfig? Settings { get; set; }
+        [JsonPropertyName("scenes")] public List<SceneConfig> Scenes { get; set; } = new();
+        [JsonPropertyName("gameObjects")] public List<GameObjectConfig> GameObjects { get; set; } = new();
 
         /// <summary>
         /// Populated by ZipLoader after extraction — never read from scene.json.
@@ -77,52 +77,52 @@ namespace UnitySceneGen
 
     public class ProjectConfig
     {
-        [JsonProperty("name")] public string Name { get; set; } = "MyProject";
-        [JsonProperty("unityVersion")] public string UnityVersion { get; set; } = "2022.3.20f1";
-        [JsonProperty("packages")] public List<string> Packages { get; set; } = new();
+        [JsonPropertyName("name")] public string Name { get; set; } = "MyProject";
+        [JsonPropertyName("unityVersion")] public string UnityVersion { get; set; } = "2022.3.20f1";
+        [JsonPropertyName("packages")] public List<string> Packages { get; set; } = new();
     }
 
     public class SettingsConfig
     {
-        [JsonProperty("tags")] public List<string> Tags { get; set; } = new();
-        [JsonProperty("layers")] public List<string> Layers { get; set; } = new();
+        [JsonPropertyName("tags")] public List<string> Tags { get; set; } = new();
+        [JsonPropertyName("layers")] public List<string> Layers { get; set; } = new();
     }
 
     public class SceneConfig
     {
-        [JsonProperty("name")] public string Name { get; set; } = "Main";
-        [JsonProperty("path")] public string Path { get; set; } = "Assets/Scenes/Main.unity";
-        [JsonProperty("roots")] public List<string> Roots { get; set; } = new();
+        [JsonPropertyName("name")] public string Name { get; set; } = "Main";
+        [JsonPropertyName("path")] public string Path { get; set; } = "Assets/Scenes/Main.unity";
+        [JsonPropertyName("roots")] public List<string> Roots { get; set; } = new();
     }
 
     public class GameObjectConfig
     {
-        [JsonProperty("id")] public string Id { get; set; } = "";
-        [JsonProperty("name")] public string Name { get; set; } = "GameObject";
-        [JsonProperty("active")] public bool Active { get; set; } = true;
-        [JsonProperty("tag")] public string Tag { get; set; } = "Untagged";
-        [JsonProperty("layer")] public string Layer { get; set; } = "Default";
-        [JsonProperty("children")] public List<string> Children { get; set; } = new();
-        [JsonProperty("components")] public List<ComponentConfig> Components { get; set; } = new();
+        [JsonPropertyName("id")] public string Id { get; set; } = "";
+        [JsonPropertyName("name")] public string Name { get; set; } = "GameObject";
+        [JsonPropertyName("active")] public bool Active { get; set; } = true;
+        [JsonPropertyName("tag")] public string Tag { get; set; } = "Untagged";
+        [JsonPropertyName("layer")] public string Layer { get; set; } = "Default";
+        [JsonPropertyName("children")] public List<string> Children { get; set; } = new();
+        [JsonPropertyName("components")] public List<ComponentConfig> Components { get; set; } = new();
 
         /// <summary>
         /// Built-in or file-based template name. Expanded by TemplateResolver before
         /// validation. Cleared after expansion — the validator only sees the full
         /// component list.
         /// </summary>
-        [JsonProperty("template")] public string? Template { get; set; }
+        [JsonPropertyName("template")] public string? Template { get; set; }
 
         /// <summary>
         /// Friendly prop overrides applied during template expansion.
         /// Keys are the template's declared prop-mapping names.
         /// </summary>
-        [JsonProperty("templateProps")] public Dictionary<string, object>? TemplateProps { get; set; }
+        [JsonPropertyName("templateProps")] public Dictionary<string, object>? TemplateProps { get; set; }
     }
 
     public class ComponentConfig
     {
-        [JsonProperty("type")] public string Type { get; set; } = "";
-        [JsonProperty("props")] public Dictionary<string, object>? Props { get; set; }
+        [JsonPropertyName("type")] public string Type { get; set; } = "";
+        [JsonPropertyName("props")] public Dictionary<string, object>? Props { get; set; }
     }
 
     // ── Generation I/O ────────────────────────────────────────────────────
@@ -138,28 +138,28 @@ namespace UnitySceneGen
 
     public class BuilderResult
     {
-        [JsonProperty("success")] public bool Success { get; set; }
-        [JsonProperty("error")] public string Error { get; set; } = "";
-        [JsonProperty("warnings")] public List<string> Warnings { get; set; } = new();
-        [JsonProperty("scenes")] public List<string> Scenes { get; set; } = new();
+        [JsonPropertyName("success")] public bool Success { get; set; }
+        [JsonPropertyName("error")] public string Error { get; set; } = "";
+        [JsonPropertyName("warnings")] public List<string> Warnings { get; set; } = new();
+        [JsonPropertyName("scenes")] public List<string> Scenes { get; set; } = new();
     }
 
     public class GenerationStatus
     {
-        [JsonProperty("running")] public bool Running { get; set; }
-        [JsonProperty("step")] public string Step { get; set; } = "Idle";
-        [JsonProperty("error")] public string Error { get; set; } = "";
-        [JsonProperty("log")] public List<string> Log { get; set; } = new();
+        [JsonPropertyName("running")] public bool Running { get; set; }
+        [JsonPropertyName("step")] public string Step { get; set; } = "Idle";
+        [JsonPropertyName("error")] public string Error { get; set; } = "";
+        [JsonPropertyName("log")] public List<string> Log { get; set; } = new();
     }
 
     // ── Template definition ───────────────────────────────────────────────
 
     public class TemplateDefinition
     {
-        [JsonProperty("name")] public string Name { get; set; } = "";
-        [JsonProperty("description")] public string Description { get; set; } = "";
-        [JsonProperty("components")] public List<ComponentConfig> Components { get; set; } = new();
-        [JsonProperty("propMappings")] public Dictionary<string, string> PropMappings { get; set; } = new();
+        [JsonPropertyName("name")] public string Name { get; set; } = "";
+        [JsonPropertyName("description")] public string Description { get; set; } = "";
+        [JsonPropertyName("components")] public List<ComponentConfig> Components { get; set; } = new();
+        [JsonPropertyName("propMappings")] public Dictionary<string, string> PropMappings { get; set; } = new();
     }
 
 
@@ -186,7 +186,7 @@ namespace UnitySceneGen
             try
             {
                 if (File.Exists(SettingsPath))
-                    return JsonConvert.DeserializeObject<AppSettings>(
+                    return JsonSerializer.Deserialize<AppSettings>(
                                File.ReadAllText(SettingsPath)) ?? new AppSettings();
             }
             catch { }
@@ -199,10 +199,27 @@ namespace UnitySceneGen
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
                 File.WriteAllText(SettingsPath,
-                    JsonConvert.SerializeObject(this, Formatting.Indented));
+                    JsonSerializer.Serialize(this, Json.Pretty));
             }
             catch { }
         }
+    }
+
+    // ── Shared JSON options ───────────────────────────────────────────────────
+    internal static class Json
+    {
+        /// <summary>Indented output, camelCase property names ignored (we use [JsonPropertyName] everywhere).</summary>
+        public static readonly JsonSerializerOptions Pretty = new()
+        {
+            WriteIndented = true,
+            PropertyNameCaseInsensitive = true,
+        };
+
+        /// <summary>Compact output for SSE payloads.</summary>
+        public static readonly JsonSerializerOptions Compact = new()
+        {
+            PropertyNameCaseInsensitive = true,
+        };
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -314,8 +331,8 @@ namespace UnitySceneGen
             SceneGenConfig cfg;
             try
             {
-                cfg = JsonConvert.DeserializeObject<SceneGenConfig>(
-                          File.ReadAllText(sceneJsonPath))
+                cfg = JsonSerializer.Deserialize<SceneGenConfig>(
+                          File.ReadAllText(sceneJsonPath), Json.Pretty)
                       ?? throw new InvalidDataException("scene.json deserialised to null.");
             }
             catch (JsonException ex)
@@ -744,7 +761,7 @@ namespace UnitySceneGen
             {
                 try
                 {
-                    var tpl = JsonConvert.DeserializeObject<TemplateDefinition>(File.ReadAllText(file));
+                    var tpl = JsonSerializer.Deserialize<TemplateDefinition>(File.ReadAllText(file), Json.Pretty);
                     if (tpl == null || string.IsNullOrWhiteSpace(tpl.Name)) continue;
                     cache[tpl.Name] = tpl;
                 }
@@ -933,8 +950,30 @@ namespace UnitySceneGen
             foreach (var (key, rawValue) in props)
             {
                 if (rawValue == null) continue;
-                var strVal = rawValue is string s ? s : (rawValue as JValue)?.Value<string>();
-                var arrayVal = rawValue as JArray;
+
+                // With System.Text.Json, Dictionary<string,object> values are JsonElement.
+                // Built-in template props may be plain CLR types (string, double[], bool) —
+                // handle both cases.
+                string? strVal = rawValue is string s ? s
+                    : rawValue is JsonElement je && je.ValueKind == JsonValueKind.String ? je.GetString()
+                    : null;
+
+                int? arrayLen = rawValue is JsonElement ja && ja.ValueKind == JsonValueKind.Array ? ja.GetArrayLength()
+                    : rawValue is System.Collections.IList list ? list.Count
+                    : (int?)null;
+
+                bool isNumericArray = false;
+                if (arrayLen.HasValue)
+                {
+                    isNumericArray = true;
+                    if (rawValue is JsonElement jArr)
+                    {
+                        foreach (var el in jArr.EnumerateArray())
+                            if (el.ValueKind != JsonValueKind.Number)
+                            { isNumericArray = false; break; }
+                    }
+                    // CLR arrays from built-in templates are always numeric
+                }
 
                 if (strVal != null)
                 {
@@ -951,15 +990,14 @@ namespace UnitySceneGen
                             r.Errors.Add($"'{compType}' on '{goId}': '{key}' references '{refId}' which doesn't exist.");
                     }
                 }
-                else if (arrayVal != null)
+                else if (arrayLen.HasValue)
                 {
-                    if (arrayVal.Count != 2 && arrayVal.Count != 3 && arrayVal.Count != 4)
-                        r.Errors.Add($"'{compType}' on '{goId}': '{key}' array has {arrayVal.Count} elements " +
+                    if (arrayLen.Value != 2 && arrayLen.Value != 3 && arrayLen.Value != 4)
+                        r.Errors.Add($"'{compType}' on '{goId}': '{key}' array has {arrayLen.Value} elements " +
                                      $"(must be 2=Vector2, 3=Vector3, or 4=Vector4).");
 
-                    foreach (var el in arrayVal)
-                        if (el.Type != JTokenType.Integer && el.Type != JTokenType.Float)
-                            r.Errors.Add($"'{compType}' on '{goId}': '{key}' array element \"{el}\" is not a number.");
+                    if (!isNumericArray)
+                        r.Errors.Add($"'{compType}' on '{goId}': '{key}' array contains non-numeric elements.");
                 }
             }
         }
@@ -1146,7 +1184,7 @@ namespace UnitySceneGen
 
             File.WriteAllText(
                 Path.Combine(root, "Packages", "manifest.json"),
-                JsonConvert.SerializeObject(new { dependencies = deps }, Formatting.Indented));
+                JsonSerializer.Serialize(new { dependencies = deps }, Json.Pretty));
 
             log($"  Packages/manifest.json — {deps.Count} packages");
         }
@@ -1185,7 +1223,7 @@ namespace UnitySceneGen
         private static void WriteConfig(SceneGenConfig cfg, string root, Action<string> log)
         {
             var dest = Path.Combine(root, "SceneGenConfig.json");
-            File.WriteAllText(dest, JsonConvert.SerializeObject(cfg, Formatting.Indented));
+            File.WriteAllText(dest, JsonSerializer.Serialize(cfg, Json.Pretty));
             log($"[ProjectCreator] SceneGenConfig.json → {dest}");
         }
 
@@ -1286,7 +1324,7 @@ namespace UnitySceneGen
 
             try
             {
-                var result = JsonConvert.DeserializeObject<BuilderResult>(File.ReadAllText(resultPath));
+                var result = JsonSerializer.Deserialize<BuilderResult>(File.ReadAllText(resultPath), Json.Pretty);
                 return result ?? Fail("SceneGenResult.json was empty or malformed.");
             }
             catch (Exception ex)
@@ -1581,13 +1619,13 @@ namespace UnitySceneGen
                 log("  ✓  Scene(s) generated.");
 
                 var summaryPath = Path.Combine(projectPath, "SceneGenOutput.json");
-                File.WriteAllText(summaryPath, JsonConvert.SerializeObject(new
+                File.WriteAllText(summaryPath, JsonSerializer.Serialize(new
                 {
                     projectPath,
                     scenes = builderResult.Scenes,
                     warnings = builderResult.Warnings,
                     generatedAt = DateTime.UtcNow.ToString("o"),
-                }, Formatting.Indented));
+                }, Json.Pretty));
 
                 return new GenerationResult
                 {
@@ -2061,6 +2099,8 @@ namespace UnitySceneGen
                     case ("GET", "/status"): await WriteJsonAsync(res, GetStatusSnapshot()); break;
                     case ("GET", "/swagger") or ("GET", "/swagger/"): await WriteRawAsync(res, SwaggerUiHtml(), "text/html"); break;
                     case ("GET", "/openapi.json"): await WriteRawAsync(res, OpenApiSpec(), "application/json"); break;
+                    case ("GET", "/code"): await HandleGetCodeAsync(res); break;
+                    case ("GET", "/csproj"): await HandleGetCsprojAsync(res); break;
                     case ("POST", "/validate"): await HandleValidateAsync(req, res); break;
                     case ("POST", "/generate"): await HandleGenerateAsync(req, res); break;
                     case ("POST", "/generate/upload"): await HandleGenerateUploadAsync(req, res); break;
@@ -2086,7 +2126,7 @@ namespace UnitySceneGen
                 body = await sr.ReadToEndAsync();
 
             string? zipBase64;
-            try { zipBase64 = JObject.Parse(body)["sceneZipBase64"]?.Value<string>(); }
+            try { zipBase64 = JsonDocument.Parse(body).RootElement.GetProperty("sceneZipBase64").GetString(); }
             catch (Exception ex) { res.StatusCode = 400; await WriteJsonAsync(res, new { error = $"Bad JSON: {ex.Message}" }); return; }
 
             if (string.IsNullOrWhiteSpace(zipBase64))
@@ -2134,11 +2174,12 @@ namespace UnitySceneGen
                 bool force;
                 try
                 {
-                    var obj = JObject.Parse(body);
-                    zipBase64 = obj["sceneZipBase64"]?.Value<string>();
-                    unityExeArg = obj["unityExePath"]?.Value<string>();
-                    outputDirArg = obj["outputDir"]?.Value<string>();
-                    force = obj["force"]?.Value<bool>() ?? false;
+                    using var doc = JsonDocument.Parse(body);
+                    var root = doc.RootElement;
+                    zipBase64 = root.TryGetProperty("sceneZipBase64", out var p1) ? p1.GetString() : null;
+                    unityExeArg = root.TryGetProperty("unityExePath", out var p2) ? p2.GetString() : null;
+                    outputDirArg = root.TryGetProperty("outputDir", out var p3) ? p3.GetString() : null;
+                    force = root.TryGetProperty("force", out var p4) && p4.GetBoolean();
                 }
                 catch (Exception ex)
                 { res.StatusCode = 400; await WriteJsonAsync(res, new { error = $"Bad JSON: {ex.Message}" }); return; }
@@ -2206,7 +2247,7 @@ namespace UnitySceneGen
                 if (!result.Success)
                 {
                     lock (_statusLock) { _status.Error = result.Error; _status.Step = "Failed"; }
-                    var errPayload = JsonConvert.SerializeObject(new { error = result.Error, warnings = result.Warnings });
+                    var errPayload = JsonSerializer.Serialize(new { error = result.Error, warnings = result.Warnings }, Json.Compact);
                     await writer.WriteAsync($"event: error\ndata: {EscapeSseData(errPayload)}\n\n");
                     await writer.FlushAsync();
                     return;
@@ -2220,14 +2261,14 @@ namespace UnitySceneGen
 
                 var zipOut = await File.ReadAllBytesAsync(zipOutPath);
 
-                var donePayload = JsonConvert.SerializeObject(new
+                var donePayload = JsonSerializer.Serialize(new
                 {
                     success = true,
                     projectName,
                     sizeKb = zipOut.Length / 1024,
                     warnings = result.Warnings,
                     zipBase64 = Convert.ToBase64String(zipOut),
-                });
+                }, Json.Compact);
 
                 await writer.WriteAsync($"event: result\ndata: {EscapeSseData(donePayload)}\n\n");
                 await writer.FlushAsync();
@@ -2257,16 +2298,16 @@ namespace UnitySceneGen
                 using (var sr = new StreamReader(req.InputStream, req.ContentEncoding))
                     body = await sr.ReadToEndAsync();
 
-                JObject? apiReq;
-                try { apiReq = JObject.Parse(body); }
+                JsonElement apiReq;
+                try { apiReq = JsonDocument.Parse(body).RootElement; }
                 catch (Exception ex) { res.StatusCode = 400; await WriteJsonAsync(res, new { error = $"Bad JSON: {ex.Message}" }); return; }
 
-                string? zipBase64 = apiReq?["projectZipBase64"]?.Value<string>();
-                string? projectName = apiReq?["projectName"]?.Value<string>();
-                string? unityExe = apiReq?["unityExePath"]?.Value<string>();
-                string? gcsBucket = apiReq?["gcsBucket"]?.Value<string>() ?? "aqe-unity-builds";
-                string? gcsKeyJson = apiReq?["gcsKeyJson"]?.Value<string>();
-                bool development = apiReq?["development"]?.Value<bool>() ?? false;
+                string? zipBase64 = apiReq.TryGetProperty("projectZipBase64", out var b1) ? b1.GetString() : null;
+                string? projectName = apiReq.TryGetProperty("projectName", out var b2) ? b2.GetString() : null;
+                string? unityExe = apiReq.TryGetProperty("unityExePath", out var b3) ? b3.GetString() : null;
+                string? gcsBucket = apiReq.TryGetProperty("gcsBucket", out var b4) ? b4.GetString() : "aqe-unity-builds";
+                string? gcsKeyJson = apiReq.TryGetProperty("gcsKeyJson", out var b5) ? b5.GetString() : null;
+                bool development = apiReq.TryGetProperty("development", out var b6) && b6.GetBoolean();
 
                 if (string.IsNullOrWhiteSpace(zipBase64))
                 { res.StatusCode = 400; await WriteJsonAsync(res, new { error = "projectZipBase64 is required." }); return; }
@@ -2486,7 +2527,7 @@ namespace UnitySceneGen
                 if (!result.Success)
                 {
                     lock (_statusLock) { _status.Error = result.Error; _status.Step = "Failed"; }
-                    var errPayload = JsonConvert.SerializeObject(new { error = result.Error, warnings = result.Warnings });
+                    var errPayload = JsonSerializer.Serialize(new { error = result.Error, warnings = result.Warnings }, Json.Compact);
                     await writer.WriteAsync($"event: error\ndata: {EscapeSseData(errPayload)}\n\n");
                     await writer.FlushAsync();
                 }
@@ -2502,14 +2543,14 @@ namespace UnitySceneGen
                     var zipOut = await File.ReadAllBytesAsync(zipOutPath);
                     var zipBase64 = Convert.ToBase64String(zipOut);
 
-                    var donePayload = JsonConvert.SerializeObject(new
+                    var donePayload = JsonSerializer.Serialize(new
                     {
                         success = true,
                         projectName,
                         sizeKb = zipOut.Length / 1024,
                         warnings = result.Warnings,
                         zipBase64,
-                    });
+                    }, Json.Compact);
 
                     await writer.WriteAsync($"event: result\ndata: {EscapeSseData(donePayload)}\n\n");
                     await writer.FlushAsync();
@@ -2634,6 +2675,52 @@ namespace UnitySceneGen
 
         // ── Root info ─────────────────────────────────────────────────────
 
+        // ── GET /code ─────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns the full contents of Program.cs.
+        /// Resolves path by going up from the executable's bin folder to the
+        /// project root, then reading Program.cs from that directory.
+        /// </summary>
+        private async Task HandleGetCodeAsync(HttpListenerResponse res)
+        {
+            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+            var projectDir = Path.GetDirectoryName(exeDir)!;   // parent of bin/
+            var filePath = Path.Combine(projectDir, "Program.cs");
+
+            if (!File.Exists(filePath))
+            {
+                res.StatusCode = 404;
+                await WriteJsonAsync(res, new { error = $"Program.cs not found at: {filePath}" });
+                return;
+            }
+
+            await WriteRawAsync(res, await File.ReadAllTextAsync(filePath), "text/plain");
+        }
+
+        // ── GET /csproj ───────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns the full contents of the project's .csproj file.
+        /// Resolves path by going up from the executable's bin folder to the
+        /// project root, then finding the first .csproj in that directory.
+        /// </summary>
+        private async Task HandleGetCsprojAsync(HttpListenerResponse res)
+        {
+            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+            var projectDir = Path.GetDirectoryName(exeDir)!;   // parent of bin/
+            var csprojFiles = Directory.GetFiles(projectDir, "*.csproj");
+
+            if (csprojFiles.Length == 0)
+            {
+                res.StatusCode = 404;
+                await WriteJsonAsync(res, new { error = $"No .csproj file found in: {projectDir}" });
+                return;
+            }
+
+            await WriteRawAsync(res, await File.ReadAllTextAsync(csprojFiles[0]), "text/plain");
+        }
+
         private object RootInfo() => new
         {
             service = "UnitySceneGen API",
@@ -2646,6 +2733,8 @@ namespace UnitySceneGen
                 $"GET  /status        — live job status",
                 $"GET  /swagger       — Swagger UI",
                 $"GET  /openapi.json  — OpenAPI 3.0 spec",
+                $"GET  /code          — return the full text of Program.cs (main application code)",
+                $"GET  /csproj        — return the full text of the project .csproj file",
                 $"POST /validate         — validate scene.zip without Unity (< 1 s)",
                 $"POST /generate         — generate Unity project from scene.zip (JSON/base64), returns .zip",
                 $"POST /generate/upload  — upload scene.zip (multipart/form-data), streams SSE logs + result",
@@ -2698,6 +2787,8 @@ namespace UnitySceneGen
   "paths": {
     "/schema":   { "get":  { "summary": "Component and template catalog", "operationId": "getSchema",   "responses": { "200": { "description": "Schema" } } } },
     "/status":   { "get":  { "summary": "Live job status",                "operationId": "getStatus",   "responses": { "200": { "description": "Status" } } } },
+    "/code":     { "get":  { "summary": "Return the full text of Program.cs", "operationId": "getCode", "responses": { "200": { "description": "Plain text of Program.cs" }, "404": { "description": "File not found" } } } },
+    "/csproj":   { "get":  { "summary": "Return the full text of the project .csproj file", "operationId": "getCsproj", "responses": { "200": { "description": "Plain text of the .csproj file" }, "404": { "description": "File not found" } } } },
     "/validate": { "post": { "summary": "Validate scene.zip without Unity", "operationId": "validate",
       "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ZipRequest" } } } },
       "responses": { "200": { "description": "Valid" }, "422": { "description": "Invalid" }, "400": { "description": "Bad request" } }
@@ -2751,7 +2842,7 @@ namespace UnitySceneGen
         // ── Helpers ───────────────────────────────────────────────────────
 
         private static async Task WriteJsonAsync(HttpListenerResponse res, object obj)
-            => await WriteRawAsync(res, JsonConvert.SerializeObject(obj, Formatting.Indented), "application/json");
+            => await WriteRawAsync(res, JsonSerializer.Serialize(obj, Json.Pretty), "application/json");
 
         private static async Task WriteRawAsync(HttpListenerResponse res, string text, string contentType)
         {

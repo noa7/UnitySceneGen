@@ -18,6 +18,12 @@
 5.  Receive the result event from the SSE stream → extract zipBase64
 ```
 
+To inspect the running application's source files at any time:
+```
+GET /code    → returns the full text of Program.cs (main application code)
+GET /csproj  → returns the full text of the project .csproj (build configuration)
+```
+
 If you already have a generated Unity project and only want a WebGL build:
 ```
 4b. POST /build           → WebGL build + optional GCS upload
@@ -79,6 +85,40 @@ Returns a snapshot of the currently running (or last completed) job. Safe to cal
 | `log` | string[] | All log lines accumulated since the job started |
 
 > **Note:** `/status` accumulates all log lines for the lifetime of the job. Use the SSE stream on `/generate` or `/generate/upload` for real-time delivery.
+
+---
+
+### `GET /code`
+
+Returns the full text of `Program.cs` — the main application source file.
+
+The server resolves the path at runtime by locating the running executable, stepping up to the parent of the `bin` folder, and reading `Program.cs` from that directory. This means the endpoint always returns the exact source that was compiled into the running binary.
+
+**Purpose:** Exposes the underlying application code so callers (LLMs, automation scripts, debugging tools) can inspect the full implementation without needing filesystem access to the host machine.
+
+**Response `200`** (`text/plain`): Full UTF-8 contents of `Program.cs`.
+
+**Response `404`** (`application/json`): Returned if `Program.cs` cannot be located (e.g. deployed without source files).
+```json
+{ "error": "Program.cs not found at: C:\\MyApp\\Program.cs" }
+```
+
+---
+
+### `GET /csproj`
+
+Returns the full text of the project's `.csproj` file — the MSBuild project configuration.
+
+The server resolves the path the same way as `/code`: it steps up from the executable's `bin` folder to the project root and returns the first `.csproj` file found there.
+
+**Purpose:** Exposes the project configuration and build settings (target framework, NuGet package references, build properties, etc.) so callers can inspect the project's dependencies and structure without filesystem access to the host machine.
+
+**Response `200`** (`text/plain`): Full UTF-8 contents of the `.csproj` file.
+
+**Response `404`** (`application/json`): Returned if no `.csproj` file is found in the resolved project directory.
+```json
+{ "error": "No .csproj file found in: C:\\MyApp" }
+```
 
 ---
 

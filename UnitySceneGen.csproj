@@ -2,8 +2,8 @@
 
 	<PropertyGroup>
 		<OutputType>WinExe</OutputType>
-		<TargetFramework>net6.0-windows</TargetFramework>
-		<LangVersion>11</LangVersion>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<LangVersion>12</LangVersion>
 		<UseWPF>true</UseWPF>
 		<UseWindowsForms>true</UseWindowsForms>
 		<Nullable>enable</Nullable>
@@ -14,6 +14,18 @@
 		<Platforms>AnyCPU</Platforms>
 		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
 		<SelfContained>false</SelfContained>
+
+		<BaseOutputPath>bin</BaseOutputPath>
+		<OutputPath>bin\</OutputPath>
+
+		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+		<AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+		<UseCommonOutputDirectory>true</UseCommonOutputDirectory>
+
+		<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+
+		<ApplicationIcon>appicon.ico</ApplicationIcon>
+
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -24,12 +36,13 @@
 		<Compile Remove="UnityBuilder\Builder.cs" />
 
 		<!-- Embed as a raw resource so the exe is fully self-contained. -->
-		<EmbeddedResource Include="UnityBuilder\Builder.cs"
-						  LogicalName="UnitySceneGen.UnityBuilder.Builder.cs" />
+		<EmbeddedResource Include="UnityBuilder\Builder.cs" LogicalName="UnitySceneGen.UnityBuilder.Builder.cs" />
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+		<None Update="appicon.ico">
+			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
+		</None>
 	</ItemGroup>
 
 </Project>
