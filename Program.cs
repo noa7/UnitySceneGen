@@ -1371,7 +1371,7 @@ namespace UnitySceneGen
                 if (DateTime.UtcNow > deadline)
                 {
                     timedOut = true;
-                    log($"[Unity] TIMEOUT after {timeout.TotalMinutes:F0} min — killing.");
+                    log($"[ERROR] UNITY TIMEOUT AFTER {timeout.TotalMinutes:F0} MIN — KILLING PROCESS.");
                     KillSafe(proc);
                     break;
                 }
@@ -1379,7 +1379,7 @@ namespace UnitySceneGen
                 if (DateTime.UtcNow - lastActivity > HangDetectWindow)
                 {
                     hangKill = true;
-                    log($"[Unity] No log output for {HangDetectWindow.TotalSeconds:F0}s — killing.");
+                    log($"[ERROR] UNITY PRODUCED NO LOG OUTPUT FOR {HangDetectWindow.TotalSeconds:F0}S — POSSIBLE LICENSE ISSUE OR HANG. KILLING PROCESS.");
                     KillSafe(proc);
                     break;
                 }
@@ -1402,7 +1402,10 @@ namespace UnitySceneGen
                 if (failurePatterns != null)
                     foreach (var pat in failurePatterns)
                         if (content.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            log($"[ERROR] UNITY LOG CONTAINS FAILURE PATTERN: '{pat.ToUpperInvariant()}'");
                             return (false, $"Unity log contains failure: '{pat}'");
+                        }
 
                 if (successPattern != null
                     && exitCode != 0
@@ -1500,18 +1503,19 @@ namespace UnitySceneGen
 
                 var templateWarnings = new List<string>();
                 TemplateResolver.Resolve(cfg, loaded.TemplatesDir, templateWarnings);
-                foreach (var w in templateWarnings) log($"  ⚠  {w}");
+                foreach (var w in templateWarnings) log($"  [WARN] {w.ToUpperInvariant()}");
                 ct.ThrowIfCancellationRequested();
 
                 // ── 3. Validate ───────────────────────────────────────────
                 log("=== Step 3/6: Validating config ===");
 
                 var validation = ConfigValidator.ValidateConfig(cfg);
-                foreach (var w in validation.Warnings) log($"  ⚠  {w}");
+                foreach (var w in validation.Warnings) log($"  [WARN] {w.ToUpperInvariant()}");
 
                 if (!validation.Valid)
                 {
-                    foreach (var e in validation.Errors) log($"  ✗  {e}");
+                    foreach (var e in validation.Errors) log($"  [ERROR] {e.ToUpperInvariant()}");
+                    log($"[ERROR] CONFIG VALIDATION FAILED — {validation.Errors.Count} ERROR(S): {string.Join("; ", validation.Errors).ToUpperInvariant()}");
                     return Fail(
                         $"Config validation failed ({validation.Errors.Count} error(s)): " +
                         string.Join("; ", validation.Errors));
@@ -1529,6 +1533,7 @@ namespace UnitySceneGen
                 }
                 catch (Exception ex)
                 {
+                    log($"[ERROR] PROJECT CREATION FAILED: {ex.Message.ToUpperInvariant()}");
                     return Fail($"Project creation error: {ex.Message}");
                 }
                 log($"  ✓  Project folder ready: {projectPath}");
@@ -1541,7 +1546,10 @@ namespace UnitySceneGen
                     unityExePath, projectPath, log, ct).GetAwaiter().GetResult();
 
                 if (!pass1.ok)
+                {
+                    log($"[ERROR] UNITY PASS 1 FAILED: {pass1.error.ToUpperInvariant()}");
                     return Fail($"Unity Pass 1 failed: {pass1.error}");
+                }
 
                 log("  ✓  Pass 1 complete.");
                 ct.ThrowIfCancellationRequested();
@@ -1558,13 +1566,17 @@ namespace UnitySceneGen
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
+                    log($"[ERROR] UNITY PASS 2 LAUNCH ERROR: {ex.Message.ToUpperInvariant()}");
                     return Fail($"Unity Pass 2 launch error: {ex.Message}");
                 }
 
-                foreach (var w in builderResult.Warnings) log($"  ⚠  {w}");
+                foreach (var w in builderResult.Warnings) log($"  [WARN] {w.ToUpperInvariant()}");
 
                 if (!builderResult.Success)
+                {
+                    log($"[ERROR] UNITY BUILDER FAILED: {builderResult.Error.ToUpperInvariant()}");
                     return Fail($"Unity Builder failed: {builderResult.Error}");
+                }
 
                 log("  ✓  Scene(s) generated.");
 
@@ -2090,6 +2102,15 @@ namespace UnitySceneGen
         }
 
         // ── POST /generate ────────────────────────────────────────────────
+        // Now streams real-time logs via Server-Sent Events (SSE).
+        // Response content-type: text/event-stream
+        //
+        // Event types:
+        //   data: <log line>            — a single log line emitted as it happens
+        //   event: result\ndata: ...    — job succeeded; JSON payload contains zipBase64
+        //   event: error\ndata: ...     — job failed; JSON payload contains error + warnings
+        //
+        // Error and warning log lines are emitted in UPPER CASE for visibility.
 
         private async Task HandleGenerateAsync(HttpListenerRequest req, HttpListenerResponse res)
         {
@@ -2145,10 +2166,17 @@ namespace UnitySceneGen
 
                 Directory.CreateDirectory(outputDir);
 
-                var logs = new List<string>();
+                // ── Open SSE response ─────────────────────────────────────
+                res.StatusCode = 200;
+                res.ContentType = "text/event-stream; charset=utf-8";
+                res.AddHeader("Cache-Control", "no-cache");
+                res.AddHeader("X-Accel-Buffering", "no");
+
+                var logQueue = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
                 void Log(string line)
                 {
-                    logs.Add(line);
+                    logQueue.Enqueue(line);
                     StatusLog(line);
                     UiLog?.Invoke(line);
                     if (line.Contains("Step 1/6")) StatusStep("1/6 — Loading zip");
@@ -2159,14 +2187,28 @@ namespace UnitySceneGen
                     else if (line.Contains("Step 6/6")) StatusStep("6/6 — Unity Pass 2 (build)");
                 }
 
-                var result = await Task.Run(() =>
+                var genTask = Task.Run(() =>
                     GenerationEngine.Run(zipBytes, unityExe, outputDir, force, Log, CancellationToken.None));
+
+                using var writer = new StreamWriter(res.OutputStream,
+                    new System.Text.UTF8Encoding(false), leaveOpen: true)
+                { AutoFlush = false };
+
+                while (!genTask.IsCompleted)
+                {
+                    await SseFlushLogs(writer, logQueue);
+                    await Task.Delay(40);
+                }
+                await SseFlushLogs(writer, logQueue);  // drain final lines
+
+                var result = await genTask;
 
                 if (!result.Success)
                 {
                     lock (_statusLock) { _status.Error = result.Error; _status.Step = "Failed"; }
-                    res.StatusCode = 422;
-                    await WriteJsonAsync(res, new { error = result.Error, warnings = result.Warnings, log = logs });
+                    var errPayload = JsonConvert.SerializeObject(new { error = result.Error, warnings = result.Warnings });
+                    await writer.WriteAsync($"event: error\ndata: {EscapeSseData(errPayload)}\n\n");
+                    await writer.FlushAsync();
                     return;
                 }
 
@@ -2177,19 +2219,25 @@ namespace UnitySceneGen
                     CompressionLevel.Optimal, includeBaseDirectory: true);
 
                 var zipOut = await File.ReadAllBytesAsync(zipOutPath);
-                res.StatusCode = 200;
-                res.ContentType = "application/zip";
-                res.AddHeader("Content-Disposition", $"attachment; filename=\"{projectName}.zip\"");
-                res.AddHeader("X-Warnings", string.Join("|", result.Warnings));
-                res.ContentLength64 = zipOut.Length;
-                await res.OutputStream.WriteAsync(zipOut);
-                res.OutputStream.Close();
+
+                var donePayload = JsonConvert.SerializeObject(new
+                {
+                    success = true,
+                    projectName,
+                    sizeKb = zipOut.Length / 1024,
+                    warnings = result.Warnings,
+                    zipBase64 = Convert.ToBase64String(zipOut),
+                });
+
+                await writer.WriteAsync($"event: result\ndata: {EscapeSseData(donePayload)}\n\n");
+                await writer.FlushAsync();
                 StatusLog($"[API] Done. Sent {zipOut.Length / 1024:N0} KB.");
             }
             finally
             {
                 lock (_statusLock) { _status.Running = false; }
                 _genToken.Dispose();
+                try { res.OutputStream.Close(); } catch { }
             }
         }
 
