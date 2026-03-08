@@ -1,34 +1,35 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
+
 	<PropertyGroup>
 		<OutputType>WinExe</OutputType>
-		<TargetFramework>net8.0-windows</TargetFramework>
+		<TargetFramework>net6.0-windows</TargetFramework>
+		<LangVersion>11</LangVersion>
 		<UseWPF>true</UseWPF>
 		<UseWindowsForms>true</UseWindowsForms>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>disable</ImplicitUsings>
 		<AssemblyName>UnitySceneGen</AssemblyName>
 		<RootNamespace>UnitySceneGen</RootNamespace>
-		<LangVersion>11</LangVersion>
-		<Nullable>enable</Nullable>
-		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-		<PublishSingleFile>true</PublishSingleFile>
+		<StartupObject>UnitySceneGen.Program</StartupObject>
+		<Platforms>AnyCPU</Platforms>
+		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
 		<SelfContained>false</SelfContained>
-
-		<OutputPath>bin\</OutputPath>
-		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-		<AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
-		
-		
 	</PropertyGroup>
+
 	<ItemGroup>
-		<PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-	</ItemGroup>
-	<ItemGroup>
-		<!-- Builder.cs embedded so the exe ships as a single file -->
+		<!-- IMPORTANT: Remove from compilation first.
+         Builder.cs uses UnityEngine/UnityEditor APIs — it must NEVER be compiled
+         by the .NET build. It is only embedded as raw bytes and written into the
+         Unity project folder at runtime by ProjectCreator. -->
+		<Compile Remove="UnityBuilder\Builder.cs" />
+
+		<!-- Embed as a raw resource so the exe is fully self-contained. -->
 		<EmbeddedResource Include="UnityBuilder\Builder.cs"
 						  LogicalName="UnitySceneGen.UnityBuilder.Builder.cs" />
 	</ItemGroup>
 
 	<ItemGroup>
-		<Compile Remove="UnityBuilder\Builder.cs" />
+		<PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
 	</ItemGroup>
 
 </Project>
