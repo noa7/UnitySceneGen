@@ -2012,8 +2012,8 @@ namespace UnitySceneGen
 
     public sealed class ApiServer : IDisposable
     {
-        /// <summary>Hardcoded port — safe, above ephemeral range, unlikely to conflict.</summary>
-        public const int DefaultPort = 50831;
+        /// <summary>Fixed port — always 46001. Cannot be overridden at runtime.</summary>
+        public const int DefaultPort = 46001;
 
         private readonly int _port;
         private readonly HttpListener _listener;
@@ -2056,7 +2056,18 @@ namespace UnitySceneGen
         {
             if (!System.Diagnostics.Debugger.IsAttached)
             {
-                _listener.Start();
+                try
+                {
+                    _listener.Start();
+                }
+                catch (System.Net.HttpListenerException ex)
+                {
+                    throw new InvalidOperationException(
+                        $"[LAUNCH ERROR] Port {_port} is already in use. " +
+                        $"Another process is listening on that port. " +
+                        $"Stop the conflicting process and restart UnitySceneGen. " +
+                        $"(HttpListenerException: {ex.Message})", ex);
+                }
                 Console.WriteLine($"[API] Listening  →  http://*:{_port}/");
                 Console.WriteLine($"[API] Swagger UI →  http://*:{_port}/swagger");
                 Console.WriteLine($"[API] OpenAPI    →  http://*:{_port}/openapi.json");
@@ -3240,12 +3251,8 @@ namespace UnitySceneGen
         [STAThread]
         public static int Main(string[] args)
         {
-            // Allow --port <n> to override the hardcoded default.
-            int apiPort = ApiServer.DefaultPort;  // 50831
-            for (int i = 0; i < args.Length - 1; i++)
-                if (args[i].Equals("--port", StringComparison.OrdinalIgnoreCase)
-                    && int.TryParse(args[i + 1], out var p))
-                    apiPort = p;
+            // Port is fixed at 46001 — no runtime override.
+            int apiPort = ApiServer.DefaultPort;
 
             // ── API-only mode ─────────────────────────────────────────────
             if (Array.Exists(args, a => a.Equals("--api-only", StringComparison.OrdinalIgnoreCase)))
@@ -3255,7 +3262,15 @@ namespace UnitySceneGen
 
                 var gate = new ProcessingGate();
                 var server = new ApiServer(apiPort, gate);
-                server.Start();
+                try
+                {
+                    server.Start();
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Console.Error.WriteLine(ex.Message);
+                    return 1;
+                }
 
                 Console.WriteLine($"Running in API-only mode on port {apiPort}. Press Ctrl+C to stop.");
                 var done = new ManualResetEventSlim(false);
@@ -3268,7 +3283,18 @@ namespace UnitySceneGen
             // The API server always starts automatically when the GUI launches.
             var sharedGate = new ProcessingGate();
             var bgServer = new ApiServer(apiPort, sharedGate);
-            bgServer.Start();
+            try
+            {
+                bgServer.Start();
+            }
+            catch (InvalidOperationException ex)
+            {
+                if (!AttachConsole(-1)) AllocConsole();
+                Console.Error.WriteLine(ex.Message);
+                MessageBox.Show(ex.Message, "Launch Error — Port In Use",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return 1;
+            }
 
             var app = new Application();
             app.ShutdownMode = ShutdownMode.OnMainWindowClose;

@@ -1,7 +1,7 @@
 # UnitySceneGen API Reference
 
 > **Audience:** Callers of the HTTP API — including LLMs, automation scripts, and CI pipelines.
-> **Base URL:** `http://localhost:50831` (default port; override with `--port <n>` on startup)
+> **Base URL:** `http://localhost:46001` (fixed port; cannot be overridden at runtime)
 > **Authentication:** None. CORS is open (`*`).
 
 ---
@@ -42,7 +42,7 @@ Returns a summary of the service and all available endpoints.
 {
   "service": "UnitySceneGen API",
   "version": "2.0.0",
-  "port": 50831,
+  "port": 46001,
   "defaultUnityExePath": "C:\\Program Files\\Unity\\Hub\\Editor\\6000.0.3f1\\Editor\\Unity.exe",
   "endpoints": [ "..." ]
 }
@@ -250,7 +250,7 @@ with open("scene.zip", "rb") as f:
 
 payload = {"sceneZipBase64": zip_b64}
 
-with requests.post("http://localhost:50831/generate",
+with requests.post("http://localhost:46001/generate",
                    json=payload, stream=True) as resp:
     resp.raise_for_status()
 
@@ -289,7 +289,7 @@ const fs = require('fs');
 
 const zipB64 = fs.readFileSync('scene.zip').toString('base64');
 
-const res = await fetch('http://localhost:50831/generate', {
+const res = await fetch('http://localhost:46001/generate', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ sceneZipBase64: zipB64 }),
@@ -467,7 +467,7 @@ def wait_until_free(base_url, poll_interval=2.0, timeout=1800):
         time.sleep(poll_interval)
     raise TimeoutError("Server stayed busy for too long")
 
-wait_until_free("http://localhost:50831")
+wait_until_free("http://localhost:46001")
 # now safe to call /generate
 ```
 
@@ -566,13 +566,13 @@ Call `GET /schema` to get the full list with all available `propMappings` for ea
 A live interactive Swagger UI is available while the server is running:
 
 ```
-http://localhost:50831/swagger
+http://localhost:46001/swagger
 ```
 
 The underlying OpenAPI 3.0 spec is at:
 
 ```
-http://localhost:50831/openapi.json
+http://localhost:46001/openapi.json
 ```
 
 ---
