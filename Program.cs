@@ -2112,6 +2112,8 @@ namespace UnitySceneGen
                     case ("GET", "/openapi.json"): await WriteRawAsync(res, OpenApiSpec(), "application/json"); break;
                     case ("GET", "/code"): await HandleGetCodeAsync(res); break;
                     case ("GET", "/csproj"): await HandleGetCsprojAsync(res); break;
+                    case ("GET", "/apidocs"): await HandleGetApiDocsAsync(res); break;
+                    case ("GET", "/readmedocs"): await HandleGetReadmeDocsAsync(res); break;
                     case ("POST", "/validate"): await HandleValidateAsync(req, res); break;
                     case ("POST", "/generate"): await HandleGenerateAsync(req, res); break;
                     case ("POST", "/generate/upload"): await HandleGenerateUploadAsync(req, res); break;
@@ -2732,6 +2734,46 @@ namespace UnitySceneGen
             await WriteRawAsync(res, await File.ReadAllTextAsync(csprojFiles[0]), "text/plain");
         }
 
+        // ── GET /apidocs ──────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns the full contents of API.md located next to the executable.
+        /// </summary>
+        private async Task HandleGetApiDocsAsync(HttpListenerResponse res)
+        {
+            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+            var filePath = Path.Combine(exeDir, "API.md");
+
+            if (!File.Exists(filePath))
+            {
+                res.StatusCode = 404;
+                await WriteJsonAsync(res, new { error = $"API.md not found at: {filePath}" });
+                return;
+            }
+
+            await WriteRawAsync(res, await File.ReadAllTextAsync(filePath), "text/markdown");
+        }
+
+        // ── GET /readmedocs ───────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns the full contents of README.md located next to the executable.
+        /// </summary>
+        private async Task HandleGetReadmeDocsAsync(HttpListenerResponse res)
+        {
+            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+            var filePath = Path.Combine(exeDir, "README.md");
+
+            if (!File.Exists(filePath))
+            {
+                res.StatusCode = 404;
+                await WriteJsonAsync(res, new { error = $"README.md not found at: {filePath}" });
+                return;
+            }
+
+            await WriteRawAsync(res, await File.ReadAllTextAsync(filePath), "text/markdown");
+        }
+
         private object RootInfo() => new
         {
             service = "UnitySceneGen API",
@@ -2746,6 +2788,8 @@ namespace UnitySceneGen
                 $"GET  /openapi.json  — OpenAPI 3.0 spec",
                 $"GET  /code          — return the full text of Program.cs (main application code)",
                 $"GET  /csproj        — return the full text of the project .csproj file",
+                $"GET  /apidocs       — return the full text of API.md (API reference documentation)",
+                $"GET  /readmedocs    — return the full text of README.md (internal architecture documentation)",
                 $"POST /validate         — validate scene.zip without Unity (< 1 s)",
                 $"POST /generate         — generate Unity project from scene.zip (JSON/base64), returns .zip",
                 $"POST /generate/upload  — upload scene.zip (multipart/form-data), streams SSE logs + result",
@@ -2798,8 +2842,10 @@ namespace UnitySceneGen
   "paths": {
     "/schema":   { "get":  { "summary": "Component and template catalog", "operationId": "getSchema",   "responses": { "200": { "description": "Schema" } } } },
     "/status":   { "get":  { "summary": "Live job status",                "operationId": "getStatus",   "responses": { "200": { "description": "Status" } } } },
-    "/code":     { "get":  { "summary": "Return the full text of Program.cs", "operationId": "getCode", "responses": { "200": { "description": "Plain text of Program.cs" }, "404": { "description": "File not found" } } } },
-    "/csproj":   { "get":  { "summary": "Return the full text of the project .csproj file", "operationId": "getCsproj", "responses": { "200": { "description": "Plain text of the .csproj file" }, "404": { "description": "File not found" } } } },
+    "/code":        { "get":  { "summary": "Return the full text of Program.cs", "operationId": "getCode", "responses": { "200": { "description": "Plain text of Program.cs" }, "404": { "description": "File not found" } } } },
+    "/csproj":      { "get":  { "summary": "Return the full text of the project .csproj file", "operationId": "getCsproj", "responses": { "200": { "description": "Plain text of the .csproj file" }, "404": { "description": "File not found" } } } },
+    "/apidocs":     { "get":  { "summary": "Return the full text of API.md", "operationId": "getApiDocs", "responses": { "200": { "description": "Markdown text of API.md" }, "404": { "description": "File not found" } } } },
+    "/readmedocs":  { "get":  { "summary": "Return the full text of README.md", "operationId": "getReadmeDocs", "responses": { "200": { "description": "Markdown text of README.md" }, "404": { "description": "File not found" } } } },
     "/validate": { "post": { "summary": "Validate scene.zip without Unity", "operationId": "validate",
       "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ZipRequest" } } } },
       "responses": { "200": { "description": "Valid" }, "422": { "description": "Invalid" }, "400": { "description": "Bad request" } }
