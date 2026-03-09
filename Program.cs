@@ -15,14 +15,22 @@
 // Scripts are always physical .cs files in scripts/.
 // ═══════════════════════════════════════════════════════════════════════════
 
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -2007,7 +2015,13 @@ namespace UnitySceneGen
 
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // SECTION 10 — API SERVER
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SECTION 10 — API SERVER  (Kestrel)
+    //
+    // Replaced HttpListener with ASP.NET Core / Kestrel so the server binds on
+    // 0.0.0.0 without needing netsh URL-ACL reservations or Administrator
+    // privileges.  All endpoint logic and SSE streaming are preserved; only the
+    // transport layer changed.
     // ═══════════════════════════════════════════════════════════════════════════
 
     public sealed class ApiServer : IDisposable
@@ -2016,9 +2030,8 @@ namespace UnitySceneGen
         public const int DefaultPort = 46001;
 
         private readonly int _port;
-        private readonly HttpListener _listener;
-        private readonly CancellationTokenSource _cts = new();
         private readonly ProcessingGate _gate;
+        private WebApplication? _webApp;
 
         /// <summary>
         /// When set, every log line produced during API processing is forwarded
@@ -2048,130 +2061,212 @@ namespace UnitySceneGen
         {
             _port = port;
             _gate = gate ?? new ProcessingGate();
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://*:{port}/");
         }
+
+        // ── Start / Stop ───────────────────────────────────────────────────────
 
         public void Start()
         {
-            if (!System.Diagnostics.Debugger.IsAttached)
-            {
-                try
-                {
-                    _listener.Start();
-                }
-                catch (System.Net.HttpListenerException ex)
-                {
-                    throw new InvalidOperationException(
-                        $"[LAUNCH ERROR] Port {_port} is already in use. " +
-                        $"Another process is listening on that port. " +
-                        $"Stop the conflicting process and restart UnitySceneGen. " +
-                        $"(HttpListenerException: {ex.Message})", ex);
-                }
-                Console.WriteLine($"[API] Listening  →  http://*:{_port}/");
-                Console.WriteLine($"[API] Swagger UI →  http://*:{_port}/swagger");
-                Console.WriteLine($"[API] OpenAPI    →  http://*:{_port}/openapi.json");
-                _ = Task.Run(() => AcceptLoop(_cts.Token));
-            }
+            if (System.Diagnostics.Debugger.IsAttached) return;
+
+            var builder = WebApplication.CreateBuilder(Array.Empty<string>());
+
+            // Suppress all ASP.NET Core framework logging — the app has its own sink
+            builder.Logging.ClearProviders();
+
+            // Bind on 0.0.0.0 so remote machines can reach the server.
+            // Unlike HttpListener, Kestrel does NOT need a netsh URL-ACL
+            // reservation or Administrator rights to bind a wildcard address.
+            builder.WebHost.ConfigureKestrel(k =>
+                k.Listen(IPAddress.Any, _port,
+                    lo => lo.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1));
+
+            _webApp = builder.Build();
+            MapEndpoints(_webApp);
+
+            // StartAsync binds the port and returns immediately — does not block.
+            _webApp.StartAsync().GetAwaiter().GetResult();
+
+            Console.WriteLine($"[API] Listening  →  http://*:{_port}/");
+            Console.WriteLine($"[API] Swagger UI →  http://*:{_port}/swagger");
+            Console.WriteLine($"[API] OpenAPI    →  http://*:{_port}/openapi.json");
         }
 
-        public void Stop() { _cts.Cancel(); try { _listener.Stop(); } catch { } }
+        public void Stop()
+        {
+            if (_webApp != null)
+                _webApp.StopAsync().GetAwaiter().GetResult();
+        }
+
         public void Dispose() => Stop();
 
-        private async Task AcceptLoop(CancellationToken ct)
+        // ── Endpoint registration ──────────────────────────────────────────────
+
+        private void MapEndpoints(WebApplication app)
         {
-            while (!ct.IsCancellationRequested)
+            // ── CORS + global 500 handler ──────────────────────────────────────
+            app.Use(async (ctx, next) =>
             {
-                HttpListenerContext ctx;
-                try { ctx = await _listener.GetContextAsync(); }
-                catch { break; }
-                _ = Task.Run(() => HandleAsync(ctx), ct);
-            }
-        }
+                ctx.Response.Headers["Access-Control-Allow-Origin"] = "*";
+                ctx.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
+                ctx.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type";
 
-        private async Task HandleAsync(HttpListenerContext ctx)
-        {
-            var req = ctx.Request;
-            var res = ctx.Response;
-            try
-            {
-                res.AddHeader("Access-Control-Allow-Origin", "*");
-                res.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-                res.AddHeader("Access-Control-Allow-Headers", "Content-Type");
-
-                if (req.HttpMethod == "OPTIONS") { res.StatusCode = 204; res.Close(); return; }
-
-                var path = req.Url?.AbsolutePath.TrimEnd('/') ?? "";
-
-                switch (req.HttpMethod, path)
+                if (ctx.Request.Method == "OPTIONS")
                 {
-                    case ("GET", "") or ("GET", "/"): await WriteJsonAsync(res, RootInfo()); break;
-                    case ("GET", "/schema"): await WriteJsonAsync(res, ComponentSchema.Build()); break;
-                    case ("GET", "/status"): await WriteJsonAsync(res, GetStatusSnapshot()); break;
-                    case ("GET", "/swagger") or ("GET", "/swagger/"): await WriteRawAsync(res, SwaggerUiHtml(), "text/html"); break;
-                    case ("GET", "/openapi.json"): await WriteRawAsync(res, OpenApiSpec(), "application/json"); break;
-                    case ("GET", "/code"): await HandleGetCodeAsync(res); break;
-                    case ("GET", "/csproj"): await HandleGetCsprojAsync(res); break;
-                    case ("GET", "/apidocs"): await HandleGetApiDocsAsync(res); break;
-                    case ("GET", "/readmedocs"): await HandleGetReadmeDocsAsync(res); break;
-                    case ("POST", "/validate"): await HandleValidateAsync(req, res); break;
-                    case ("POST", "/generate"): await HandleGenerateAsync(req, res); break;
-                    case ("POST", "/generate/upload"): await HandleGenerateUploadAsync(req, res); break;
-                    case ("POST", "/build"): await HandleBuildAsync(req, res); break;
-                    default:
-                        res.StatusCode = 404;
-                        await WriteJsonAsync(res, new { error = $"No route: {req.HttpMethod} {path}" });
-                        break;
+                    ctx.Response.StatusCode = 204;
+                    return;
                 }
-            }
-            catch (Exception ex)
-            {
-                try { res.StatusCode = 500; await WriteJsonAsync(res, new { error = ex.Message }); } catch { }
-            }
+
+                try { await next(ctx); }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        ctx.Response.StatusCode = 500;
+                        await ctx.Response.WriteAsJsonAsync(new { error = ex.Message });
+                    }
+                    catch { /* response already started — nothing we can do */ }
+                }
+            });
+
+            // ── Read-only GET endpoints ────────────────────────────────────────
+            app.MapGet("/", () => Results.Json(RootInfo()));
+            app.MapGet("/schema", () => Results.Json(ComponentSchema.Build()));
+            app.MapGet("/status", () => Results.Json(GetStatusSnapshot()));
+            app.MapGet("/swagger", () => Results.Content(SwaggerUiHtml(), "text/html"));
+            app.MapGet("/openapi.json", () => Results.Content(OpenApiSpec(), "application/json"));
+            app.MapGet("/code", () => GetCodeAsync());
+            app.MapGet("/csproj", () => GetCsprojAsync());
+            app.MapGet("/apidocs", () => GetApiDocsAsync());
+            app.MapGet("/readmedocs", () => GetReadmeDocsAsync());
+
+            // ── POST endpoints ─────────────────────────────────────────────────
+            app.MapPost("/validate",
+                    async (HttpContext ctx) => await HandleValidateAsync(ctx))
+               .DisableAntiforgery();
+
+            app.MapPost("/generate",
+                    async (HttpContext ctx) => await HandleGenerateAsync(ctx))
+               .DisableAntiforgery();
+
+            app.MapPost("/generate/upload",
+                    async (HttpContext ctx) => await HandleGenerateUploadAsync(ctx))
+               .DisableAntiforgery();
+
+            app.MapPost("/build",
+                    async (HttpContext ctx) => await HandleBuildAsync(ctx))
+               .DisableAntiforgery();
         }
 
-        // ── POST /validate ────────────────────────────────────────────────
+        // ── GET /code ──────────────────────────────────────────────────────────
 
-        private async Task HandleValidateAsync(HttpListenerRequest req, HttpListenerResponse res)
+        private static async Task<IResult> GetCodeAsync()
+        {
+            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+            var projectDir = Path.GetDirectoryName(exeDir)!;   // parent of bin/
+            var filePath = Path.Combine(projectDir, "Program.cs");
+
+            return !File.Exists(filePath)
+                ? Results.NotFound(new { error = $"Program.cs not found at: {filePath}" })
+                : Results.Content(await File.ReadAllTextAsync(filePath), "text/plain");
+        }
+
+        // ── GET /csproj ────────────────────────────────────────────────────────
+
+        private static async Task<IResult> GetCsprojAsync()
+        {
+            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+            var projectDir = Path.GetDirectoryName(exeDir)!;
+            var files = Directory.GetFiles(projectDir, "*.csproj");
+
+            return files.Length == 0
+                ? Results.NotFound(new { error = $"No .csproj found in: {projectDir}" })
+                : Results.Content(await File.ReadAllTextAsync(files[0]), "text/plain");
+        }
+
+        // ── GET /apidocs ───────────────────────────────────────────────────────
+
+        private static async Task<IResult> GetApiDocsAsync()
+        {
+            var dir = Path.GetDirectoryName(
+                               Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location))!;
+            var filePath = Path.Combine(dir, "API.md");
+
+            return !File.Exists(filePath)
+                ? Results.NotFound(new { error = $"API.md not found at: {filePath}" })
+                : Results.Content(await File.ReadAllTextAsync(filePath), "text/markdown");
+        }
+
+        // ── GET /readmedocs ────────────────────────────────────────────────────
+
+        private static async Task<IResult> GetReadmeDocsAsync()
+        {
+            var dir = Path.GetDirectoryName(
+                               Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location))!;
+            var filePath = Path.Combine(dir, "README.md");
+
+            return !File.Exists(filePath)
+                ? Results.NotFound(new { error = $"README.md not found at: {filePath}" })
+                : Results.Content(await File.ReadAllTextAsync(filePath), "text/markdown");
+        }
+
+        // ── POST /validate ─────────────────────────────────────────────────────
+
+        private static async Task HandleValidateAsync(HttpContext ctx)
         {
             string body;
-            using (var sr = new StreamReader(req.InputStream, req.ContentEncoding))
+            using (var sr = new StreamReader(ctx.Request.Body))
                 body = await sr.ReadToEndAsync();
 
             string? zipBase64;
-            try { zipBase64 = JsonDocument.Parse(body).RootElement.GetProperty("sceneZipBase64").GetString(); }
-            catch (Exception ex) { res.StatusCode = 400; await WriteJsonAsync(res, new { error = $"Bad JSON: {ex.Message}" }); return; }
+            try
+            {
+                zipBase64 = JsonDocument.Parse(body).RootElement
+                                .GetProperty("sceneZipBase64").GetString();
+            }
+            catch (Exception ex)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new { error = $"Bad JSON: {ex.Message}" });
+                return;
+            }
 
             if (string.IsNullOrWhiteSpace(zipBase64))
-            { res.StatusCode = 400; await WriteJsonAsync(res, new { error = "sceneZipBase64 is required." }); return; }
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new { error = "sceneZipBase64 is required." });
+                return;
+            }
 
             byte[] zipBytes;
             try { zipBytes = Convert.FromBase64String(zipBase64); }
-            catch { res.StatusCode = 400; await WriteJsonAsync(res, new { error = "sceneZipBase64 is not valid base64." }); return; }
+            catch
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new { error = "sceneZipBase64 is not valid base64." });
+                return;
+            }
 
             var result = GenerationEngine.ValidateZip(zipBytes);
-            res.StatusCode = result.Valid ? 200 : 422;
-            await WriteJsonAsync(res, new { valid = result.Valid, errors = result.Errors, warnings = result.Warnings });
+            ctx.Response.StatusCode = result.Valid ? 200 : 422;
+            await ctx.Response.WriteAsJsonAsync(
+                new { valid = result.Valid, errors = result.Errors, warnings = result.Warnings });
         }
 
-        // ── POST /generate ────────────────────────────────────────────────
-        // Now streams real-time logs via Server-Sent Events (SSE).
-        // Response content-type: text/event-stream
-        //
-        // Event types:
-        //   data: <log line>            — a single log line emitted as it happens
-        //   event: result\ndata: ...    — job succeeded; JSON payload contains zipBase64
-        //   event: error\ndata: ...     — job failed; JSON payload contains error + warnings
-        //
-        // Error and warning log lines are emitted in UPPER CASE for visibility.
+        // ── POST /generate  (SSE streaming) ───────────────────────────────────
 
-        private async Task HandleGenerateAsync(HttpListenerRequest req, HttpListenerResponse res)
+        private async Task HandleGenerateAsync(HttpContext ctx)
         {
-            var _genToken = _gate.TryAcquire();
-            if (_genToken == null)
+            var ct = ctx.RequestAborted;
+            var token = _gate.TryAcquire();
+            if (token == null)
             {
-                res.StatusCode = 503;
-                await WriteJsonAsync(res, new { error = "Application is currently busy. Cannot process request.", hint = "Poll GET /status until 'running' is false, then retry." });
+                ctx.Response.StatusCode = 503;
+                await ctx.Response.WriteAsJsonAsync(new
+                {
+                    error = "Application is currently busy. Cannot process request.",
+                    hint = "Poll GET /status until 'running' is false, then retry."
+                });
                 return;
             }
 
@@ -2179,8 +2274,9 @@ namespace UnitySceneGen
             {
                 lock (_statusLock) _status = new GenerationStatus { Running = true, Step = "Starting…" };
 
+                // ── Parse JSON body ────────────────────────────────────────────
                 string body;
-                using (var sr = new StreamReader(req.InputStream, req.ContentEncoding))
+                using (var sr = new StreamReader(ctx.Request.Body))
                     body = await sr.ReadToEndAsync();
 
                 string? zipBase64, unityExeArg, outputDirArg;
@@ -2195,38 +2291,55 @@ namespace UnitySceneGen
                     force = root.TryGetProperty("force", out var p4) && p4.GetBoolean();
                 }
                 catch (Exception ex)
-                { res.StatusCode = 400; await WriteJsonAsync(res, new { error = $"Bad JSON: {ex.Message}" }); return; }
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsJsonAsync(new { error = $"Bad JSON: {ex.Message}" });
+                    return;
+                }
 
                 if (string.IsNullOrWhiteSpace(zipBase64))
-                { res.StatusCode = 400; await WriteJsonAsync(res, new { error = "sceneZipBase64 is required." }); return; }
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsJsonAsync(new { error = "sceneZipBase64 is required." });
+                    return;
+                }
 
                 byte[] zipBytes;
                 try { zipBytes = Convert.FromBase64String(zipBase64); }
-                catch { res.StatusCode = 400; await WriteJsonAsync(res, new { error = "sceneZipBase64 is not valid base64." }); return; }
+                catch
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsJsonAsync(new { error = "sceneZipBase64 is not valid base64." });
+                    return;
+                }
 
                 var unityExe = !string.IsNullOrWhiteSpace(unityExeArg)
                     ? unityExeArg : AppSettings.DefaultUnityExePath;
-
                 if (!File.Exists(unityExe))
                 {
-                    res.StatusCode = 400;
-                    await WriteJsonAsync(res, new { error = $"Unity executable not found: {unityExe}", defaultPath = AppSettings.DefaultUnityExePath });
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsJsonAsync(new
+                    {
+                        error = $"Unity executable not found: {unityExe}",
+                        defaultPath = AppSettings.DefaultUnityExePath
+                    });
                     return;
                 }
 
                 var outputDir = !string.IsNullOrWhiteSpace(outputDirArg)
                     ? outputDirArg
                     : Path.Combine(Path.GetTempPath(), $"UnitySceneGen_out_{Guid.NewGuid():N}");
-
                 Directory.CreateDirectory(outputDir);
 
-                // ── Open SSE response ─────────────────────────────────────
-                res.StatusCode = 200;
-                res.ContentType = "text/event-stream; charset=utf-8";
-                res.AddHeader("Cache-Control", "no-cache");
-                res.AddHeader("X-Accel-Buffering", "no");
+                // ── Open SSE response ──────────────────────────────────────────
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "text/event-stream; charset=utf-8";
+                ctx.Response.Headers["Cache-Control"] = "no-cache, no-store";
+                ctx.Response.Headers["X-Accel-Buffering"] = "no";
+                ctx.Response.Headers["Connection"] = "keep-alive";
+                await ctx.Response.Body.FlushAsync(ct);
 
-                var logQueue = new System.Collections.Concurrent.ConcurrentQueue<string>();
+                var logQueue = new ConcurrentQueue<string>();
 
                 void Log(string line)
                 {
@@ -2244,25 +2357,23 @@ namespace UnitySceneGen
                 var genTask = Task.Run(() =>
                     GenerationEngine.Run(zipBytes, unityExe, outputDir, force, Log, CancellationToken.None));
 
-                using var writer = new StreamWriter(res.OutputStream,
-                    new System.Text.UTF8Encoding(false), leaveOpen: true)
-                { AutoFlush = false };
-
+                // Stream log lines while generation runs
                 while (!genTask.IsCompleted)
                 {
-                    await SseFlushLogs(writer, logQueue);
-                    await Task.Delay(40);
+                    await SseFlushLogs(ctx.Response, logQueue, ct);
+                    try { await Task.Delay(40, ct); } catch (OperationCanceledException) { break; }
                 }
-                await SseFlushLogs(writer, logQueue);  // drain final lines
+                await SseFlushLogs(ctx.Response, logQueue, ct);   // drain final lines
 
                 var result = await genTask;
 
                 if (!result.Success)
                 {
                     lock (_statusLock) { _status.Error = result.Error; _status.Step = "Failed"; }
-                    var errPayload = JsonSerializer.Serialize(new { error = result.Error, warnings = result.Warnings }, Json.Compact);
-                    await writer.WriteAsync($"event: error\ndata: {EscapeSseData(errPayload)}\n\n");
-                    await writer.FlushAsync();
+                    var errPayload = JsonSerializer.Serialize(
+                        new { error = result.Error, warnings = result.Warnings }, Json.Compact);
+                    await ctx.Response.WriteAsync($"event: error\ndata: {EscapeSseData(errPayload)}\n\n", ct);
+                    await ctx.Response.Body.FlushAsync(ct);
                     return;
                 }
 
@@ -2273,7 +2384,6 @@ namespace UnitySceneGen
                     CompressionLevel.Optimal, includeBaseDirectory: true);
 
                 var zipOut = await File.ReadAllBytesAsync(zipOutPath);
-
                 var donePayload = JsonSerializer.Serialize(new
                 {
                     success = true,
@@ -2283,53 +2393,229 @@ namespace UnitySceneGen
                     zipBase64 = Convert.ToBase64String(zipOut),
                 }, Json.Compact);
 
-                await writer.WriteAsync($"event: result\ndata: {EscapeSseData(donePayload)}\n\n");
-                await writer.FlushAsync();
+                await ctx.Response.WriteAsync($"event: result\ndata: {EscapeSseData(donePayload)}\n\n", ct);
+                await ctx.Response.Body.FlushAsync(ct);
                 StatusLog($"[API] Done. Sent {zipOut.Length / 1024:N0} KB.");
             }
             finally
             {
                 lock (_statusLock) { _status.Running = false; }
-                _genToken.Dispose();
-                try { res.OutputStream.Close(); } catch { }
+                token.Dispose();
             }
         }
 
-        // ── POST /build ───────────────────────────────────────────────────
+        // ── POST /generate/upload  (multipart + SSE streaming) ─────────────────
+        // ASP.NET Core's built-in IFormFile replaces the manual byte-scanner that
+        // HttpListener required.
 
-        private async Task HandleBuildAsync(HttpListenerRequest req, HttpListenerResponse res)
+        private async Task HandleGenerateUploadAsync(HttpContext ctx)
         {
-            var _buildToken = _gate.TryAcquire();
-            if (_buildToken == null)
-            { res.StatusCode = 503; await WriteJsonAsync(res, new { error = "Application is currently busy. Cannot process request." }); return; }
+            var ct = ctx.RequestAborted;
+
+            // ── Parse multipart ────────────────────────────────────────────────
+            if (!ctx.Request.HasFormContentType)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new { error = "Expected multipart/form-data." });
+                return;
+            }
+
+            IFormFile? file;
+            string? unityExeArg, outputDirArg;
+            bool force;
+            try
+            {
+                var form = await ctx.Request.ReadFormAsync(ct);
+                file = form.Files.GetFile("file");
+                unityExeArg = form["unityExePath"].FirstOrDefault();
+                outputDirArg = form["outputDir"].FirstOrDefault();
+                bool.TryParse(form["force"].FirstOrDefault(), out force);
+            }
+            catch (Exception ex)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new { error = $"Failed to parse form: {ex.Message}" });
+                return;
+            }
+
+            if (file == null || file.Length == 0)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new
+                {
+                    error = "No ZIP file found in request.",
+                    hint = "Send multipart/form-data with a file field named 'file' containing scene.zip.",
+                });
+                return;
+            }
+
+            byte[] zipBytes;
+            using (var ms = new MemoryStream())
+            {
+                await file.CopyToAsync(ms, ct);
+                zipBytes = ms.ToArray();
+            }
+
+            // ── Acquire processing gate ────────────────────────────────────────
+            var token = _gate.TryAcquire();
+            if (token == null)
+            {
+                ctx.Response.StatusCode = 503;
+                await ctx.Response.WriteAsJsonAsync(new { error = "Application is currently busy. Cannot process request." });
+                return;
+            }
+
+            var unityExe = !string.IsNullOrWhiteSpace(unityExeArg)
+                ? unityExeArg : AppSettings.DefaultUnityExePath;
+            if (!File.Exists(unityExe))
+            {
+                token.Dispose();
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new
+                {
+                    error = $"Unity executable not found: {unityExe}",
+                    defaultPath = AppSettings.DefaultUnityExePath
+                });
+                return;
+            }
+
+            var outputDir = !string.IsNullOrWhiteSpace(outputDirArg)
+                ? outputDirArg
+                : Path.Combine(Path.GetTempPath(), $"UnitySceneGen_out_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(outputDir);
+
+            // ── Open SSE response ──────────────────────────────────────────────
+            ctx.Response.StatusCode = 200;
+            ctx.Response.ContentType = "text/event-stream; charset=utf-8";
+            ctx.Response.Headers["Cache-Control"] = "no-cache, no-store";
+            ctx.Response.Headers["X-Accel-Buffering"] = "no";
+            ctx.Response.Headers["Connection"] = "keep-alive";
+
+            try
+            {
+                lock (_statusLock) _status = new GenerationStatus { Running = true, Step = "Upload: starting…" };
+
+                var logQueue = new ConcurrentQueue<string>();
+
+                var genTask = Task.Run(() => GenerationEngine.Run(
+                    zipBytes, unityExe, outputDir, force,
+                    line =>
+                    {
+                        logQueue.Enqueue(line);
+                        StatusLog(line);
+                        UiLog?.Invoke(line);
+                        if (line.Contains("Step 1/6")) StatusStep("1/6 — Loading zip");
+                        else if (line.Contains("Step 2/6")) StatusStep("2/6 — Resolving templates");
+                        else if (line.Contains("Step 3/6")) StatusStep("3/6 — Validating");
+                        else if (line.Contains("Step 4/6")) StatusStep("4/6 — Setting up project");
+                        else if (line.Contains("Step 5/6")) StatusStep("5/6 — Unity Pass 1 (compile)");
+                        else if (line.Contains("Step 6/6")) StatusStep("6/6 — Unity Pass 2 (build)");
+                    },
+                    CancellationToken.None));
+
+                while (!genTask.IsCompleted)
+                {
+                    await SseFlushLogs(ctx.Response, logQueue, ct);
+                    try { await Task.Delay(40, ct); } catch (OperationCanceledException) { break; }
+                }
+                await SseFlushLogs(ctx.Response, logQueue, ct);
+
+                var result = await genTask;
+
+                if (!result.Success)
+                {
+                    lock (_statusLock) { _status.Error = result.Error; _status.Step = "Failed"; }
+                    var errPayload = JsonSerializer.Serialize(
+                        new { error = result.Error, warnings = result.Warnings }, Json.Compact);
+                    await ctx.Response.WriteAsync($"event: error\ndata: {EscapeSseData(errPayload)}\n\n", ct);
+                    await ctx.Response.Body.FlushAsync(ct);
+                }
+                else
+                {
+                    StatusStep("Done — zipping result…");
+                    var projectName = Path.GetFileName(result.ProjectPath);
+                    var zipOutPath = Path.Combine(outputDir, $"{projectName}_output.zip");
+                    ZipFile.CreateFromDirectory(result.ProjectPath, zipOutPath,
+                        CompressionLevel.Optimal, includeBaseDirectory: true);
+
+                    var zipOut = await File.ReadAllBytesAsync(zipOutPath);
+                    var donePayload = JsonSerializer.Serialize(new
+                    {
+                        success = true,
+                        projectName,
+                        sizeKb = zipOut.Length / 1024,
+                        warnings = result.Warnings,
+                        zipBase64 = Convert.ToBase64String(zipOut),
+                    }, Json.Compact);
+
+                    await ctx.Response.WriteAsync($"event: result\ndata: {EscapeSseData(donePayload)}\n\n", ct);
+                    await ctx.Response.Body.FlushAsync(ct);
+                    StatusLog($"[API/upload] Done. {zipOut.Length / 1024:N0} KB delivered via SSE.");
+                    UiLog?.Invoke($"[API/upload] Done. {zipOut.Length / 1024:N0} KB delivered via SSE.");
+                }
+            }
+            finally
+            {
+                lock (_statusLock) { _status.Running = false; }
+                token.Dispose();
+            }
+        }
+
+        // ── POST /build ────────────────────────────────────────────────────────
+
+        private async Task HandleBuildAsync(HttpContext ctx)
+        {
+            var token = _gate.TryAcquire();
+            if (token == null)
+            {
+                ctx.Response.StatusCode = 503;
+                await ctx.Response.WriteAsJsonAsync(new { error = "Application is currently busy. Cannot process request." });
+                return;
+            }
 
             try
             {
                 lock (_statusLock) _status = new GenerationStatus { Running = true, Step = "Build: receiving…" };
 
                 string body;
-                using (var sr = new StreamReader(req.InputStream, req.ContentEncoding))
+                using (var sr = new StreamReader(ctx.Request.Body))
                     body = await sr.ReadToEndAsync();
 
                 JsonElement apiReq;
                 try { apiReq = JsonDocument.Parse(body).RootElement; }
-                catch (Exception ex) { res.StatusCode = 400; await WriteJsonAsync(res, new { error = $"Bad JSON: {ex.Message}" }); return; }
+                catch (Exception ex)
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsJsonAsync(new { error = $"Bad JSON: {ex.Message}" });
+                    return;
+                }
 
                 string? zipBase64 = apiReq.TryGetProperty("projectZipBase64", out var b1) ? b1.GetString() : null;
                 string? projectName = apiReq.TryGetProperty("projectName", out var b2) ? b2.GetString() : null;
                 string? unityExe = apiReq.TryGetProperty("unityExePath", out var b3) ? b3.GetString() : null;
                 string? gcsBucket = apiReq.TryGetProperty("gcsBucket", out var b4) ? b4.GetString() : "aqe-unity-builds";
                 string? gcsKeyJson = apiReq.TryGetProperty("gcsKeyJson", out var b5) ? b5.GetString() : null;
-                bool development = apiReq.TryGetProperty("development", out var b6) && b6.GetBoolean();
 
                 if (string.IsNullOrWhiteSpace(zipBase64))
-                { res.StatusCode = 400; await WriteJsonAsync(res, new { error = "projectZipBase64 is required." }); return; }
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsJsonAsync(new { error = "projectZipBase64 is required." });
+                    return;
+                }
                 if (string.IsNullOrWhiteSpace(projectName))
-                { res.StatusCode = 400; await WriteJsonAsync(res, new { error = "projectName is required." }); return; }
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsJsonAsync(new { error = "projectName is required." });
+                    return;
+                }
 
                 unityExe = string.IsNullOrWhiteSpace(unityExe) ? AppSettings.DefaultUnityExePath : unityExe;
                 if (!File.Exists(unityExe))
-                { res.StatusCode = 400; await WriteJsonAsync(res, new { error = $"Unity not found: {unityExe}" }); return; }
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsJsonAsync(new { error = $"Unity not found: {unityExe}" });
+                    return;
+                }
 
                 var sessionDir = Path.Combine(Path.GetTempPath(), $"UnityBuild_{Guid.NewGuid():N}");
                 var projectPath = Path.Combine(sessionDir, projectName);
@@ -2347,8 +2633,11 @@ namespace UnitySceneGen
 
                     if (!Directory.Exists(projectPath))
                     {
-                        res.StatusCode = 422;
-                        await WriteJsonAsync(res, new { error = $"Expected project folder '{projectName}' not found in zip." });
+                        ctx.Response.StatusCode = 422;
+                        await ctx.Response.WriteAsJsonAsync(new
+                        {
+                            error = $"Expected project folder '{projectName}' not found in zip."
+                        });
                         return;
                     }
 
@@ -2365,14 +2654,30 @@ namespace UnitySceneGen
                         unityExe, projectPath, StatusLog, CancellationToken.None);
 
                     if (!pass1.ok)
-                    { res.StatusCode = 422; await WriteJsonAsync(res, new { error = $"Pass 1 failed: {pass1.error}", log = _status.Log }); return; }
+                    {
+                        ctx.Response.StatusCode = 422;
+                        await ctx.Response.WriteAsJsonAsync(new
+                        {
+                            error = $"Pass 1 failed: {pass1.error}",
+                            log = _status.Log
+                        });
+                        return;
+                    }
 
                     StatusStep("Build: Unity Pass 2 — WebGL build…");
                     var pass2 = await UnityLauncher.Pass2BuildAsync(
                         unityExe, projectPath, StatusLog, CancellationToken.None);
 
                     if (!pass2.Success)
-                    { res.StatusCode = 422; await WriteJsonAsync(res, new { error = $"Pass 2 failed: {pass2.Error}", log = _status.Log }); return; }
+                    {
+                        ctx.Response.StatusCode = 422;
+                        await ctx.Response.WriteAsJsonAsync(new
+                        {
+                            error = $"Pass 2 failed: {pass2.Error}",
+                            log = _status.Log
+                        });
+                        return;
+                    }
 
                     string? url = null;
                     if (!string.IsNullOrWhiteSpace(gcsBucket) && keyFilePath != null)
@@ -2383,7 +2688,14 @@ namespace UnitySceneGen
                             gcsBucket, projectName!, keyFilePath);
                     }
 
-                    await WriteJsonAsync(res, new { success = true, url, buildPath = projectPath, log = _status.Log, warnings = Array.Empty<string>() });
+                    await ctx.Response.WriteAsJsonAsync(new
+                    {
+                        success = true,
+                        url,
+                        buildPath = projectPath,
+                        log = _status.Log,
+                        warnings = Array.Empty<string>()
+                    });
                 }
                 finally
                 {
@@ -2393,9 +2705,11 @@ namespace UnitySceneGen
             finally
             {
                 lock (_statusLock) { _status.Running = false; }
-                _buildToken.Dispose();
+                token.Dispose();
             }
         }
+
+        // ── GCS upload (unchanged) ─────────────────────────────────────────────
 
         private async Task<string> UploadBuildToGcsAsync(
             string buildFolder, string bucket, string projectName, string keyFilePath)
@@ -2427,352 +2741,29 @@ namespace UnitySceneGen
             return $"https://storage.googleapis.com/{bucket}/{projectName}/index.html";
         }
 
-
-        // ── POST /generate/upload  (multipart + SSE streaming) ─────────────────
-
-        private async Task HandleGenerateUploadAsync(HttpListenerRequest req, HttpListenerResponse res)
-        {
-            // ── Parse multipart body ─────────────────────────────────────────
-            byte[]? zipBytes;
-            string? unityExeArg = null, outputDirArg = null;
-            bool force = false;
-
-            try
-            {
-                var parsed = ParseMultipart(req);
-                zipBytes = parsed.FileBytes;
-                if (parsed.Fields.TryGetValue("unityExePath", out var ue)) unityExeArg = ue;
-                if (parsed.Fields.TryGetValue("outputDir", out var od)) outputDirArg = od;
-                if (parsed.Fields.TryGetValue("force", out var fo)) bool.TryParse(fo, out force);
-            }
-            catch (Exception ex)
-            {
-                res.StatusCode = 400;
-                await WriteJsonAsync(res, new { error = $"Failed to parse multipart body: {ex.Message}" });
-                return;
-            }
-
-            if (zipBytes == null || zipBytes.Length == 0)
-            {
-                res.StatusCode = 400;
-                await WriteJsonAsync(res, new
-                {
-                    error = "No ZIP file found in request.",
-                    hint = "Send a multipart/form-data POST with a file field named 'file' containing scene.zip.",
-                });
-                return;
-            }
-
-            // ── Acquire shared processing gate ────────────────────────────
-            var token = _gate.TryAcquire();
-            if (token == null)
-            {
-                res.StatusCode = 503;
-                await WriteJsonAsync(res, new { error = "Application is currently busy. Cannot process request." });
-                return;
-            }
-
-            // ── Resolve Unity exe + output dir ──────────────────────────
-            var unityExe = !string.IsNullOrWhiteSpace(unityExeArg)
-                ? unityExeArg : AppSettings.DefaultUnityExePath;
-
-            if (!File.Exists(unityExe))
-            {
-                token.Dispose();
-                res.StatusCode = 400;
-                await WriteJsonAsync(res, new { error = $"Unity executable not found: {unityExe}", defaultPath = AppSettings.DefaultUnityExePath });
-                return;
-            }
-
-            var outputDir = !string.IsNullOrWhiteSpace(outputDirArg)
-                ? outputDirArg
-                : Path.Combine(Path.GetTempPath(), $"UnitySceneGen_out_{Guid.NewGuid():N}");
-            Directory.CreateDirectory(outputDir);
-
-            // ── Open SSE response ───────────────────────────────────
-            res.StatusCode = 200;
-            res.ContentType = "text/event-stream; charset=utf-8";
-            res.AddHeader("Cache-Control", "no-cache");
-            res.AddHeader("X-Accel-Buffering", "no");   // prevent nginx/proxy buffering
-
-            var logQueue = new System.Collections.Concurrent.ConcurrentQueue<string>();
-
-            try
-            {
-                lock (_statusLock) _status = new GenerationStatus { Running = true, Step = "Upload: starting…" };
-
-                // Capture locals for closure
-                var capZip = zipBytes;
-                var capExe = unityExe;
-                var capOut = outputDir;
-                var capForce = force;
-
-                var genTask = Task.Run(() => GenerationEngine.Run(
-                    capZip, capExe, capOut, capForce,
-                    line =>
-                    {
-                        logQueue.Enqueue(line);
-                        StatusLog(line);
-                        UiLog?.Invoke(line);
-                        if (line.Contains("Step 1/6")) StatusStep("1/6 — Loading zip");
-                        else if (line.Contains("Step 2/6")) StatusStep("2/6 — Resolving templates");
-                        else if (line.Contains("Step 3/6")) StatusStep("3/6 — Validating");
-                        else if (line.Contains("Step 4/6")) StatusStep("4/6 — Setting up project");
-                        else if (line.Contains("Step 5/6")) StatusStep("5/6 — Unity Pass 1 (compile)");
-                        else if (line.Contains("Step 6/6")) StatusStep("6/6 — Unity Pass 2 (build)");
-                    },
-                    CancellationToken.None));
-
-                // Stream log events while generation runs
-                using var writer = new StreamWriter(res.OutputStream,
-                    new System.Text.UTF8Encoding(false), leaveOpen: true)
-                { AutoFlush = false };
-
-                while (!genTask.IsCompleted)
-                {
-                    await SseFlushLogs(writer, logQueue);
-                    await Task.Delay(40);
-                }
-                await SseFlushLogs(writer, logQueue);  // drain final lines
-
-                var result = await genTask;
-
-                if (!result.Success)
-                {
-                    lock (_statusLock) { _status.Error = result.Error; _status.Step = "Failed"; }
-                    var errPayload = JsonSerializer.Serialize(new { error = result.Error, warnings = result.Warnings }, Json.Compact);
-                    await writer.WriteAsync($"event: error\ndata: {EscapeSseData(errPayload)}\n\n");
-                    await writer.FlushAsync();
-                }
-                else
-                {
-                    // Zip the generated project and embed as base64 in the result SSE event
-                    StatusStep("Done — zipping result…");
-                    var projectName = Path.GetFileName(result.ProjectPath);
-                    var zipOutPath = Path.Combine(outputDir, $"{projectName}_output.zip");
-                    ZipFile.CreateFromDirectory(result.ProjectPath, zipOutPath,
-                        CompressionLevel.Optimal, includeBaseDirectory: true);
-
-                    var zipOut = await File.ReadAllBytesAsync(zipOutPath);
-                    var zipBase64 = Convert.ToBase64String(zipOut);
-
-                    var donePayload = JsonSerializer.Serialize(new
-                    {
-                        success = true,
-                        projectName,
-                        sizeKb = zipOut.Length / 1024,
-                        warnings = result.Warnings,
-                        zipBase64,
-                    }, Json.Compact);
-
-                    await writer.WriteAsync($"event: result\ndata: {EscapeSseData(donePayload)}\n\n");
-                    await writer.FlushAsync();
-                    StatusLog($"[API/upload] Done. {zipOut.Length / 1024:N0} KB delivered via SSE.");
-                    UiLog?.Invoke($"[API/upload] Done. {zipOut.Length / 1024:N0} KB delivered via SSE.");
-                }
-            }
-            finally
-            {
-                lock (_statusLock) { _status.Running = false; }
-                token.Dispose();
-                try { res.OutputStream.Close(); } catch { }
-            }
-        }
+        // ── SSE helper ─────────────────────────────────────────────────────────
 
         private static async Task SseFlushLogs(
-            StreamWriter writer,
-            System.Collections.Concurrent.ConcurrentQueue<string> queue)
+            HttpResponse response,
+            ConcurrentQueue<string> queue,
+            CancellationToken ct)
         {
             bool wrote = false;
             while (queue.TryDequeue(out var line))
             {
-                await writer.WriteAsync($"data: {EscapeSseData(line)}\n\n");
+                await response.WriteAsync($"data: {EscapeSseData(line)}\n\n", ct);
                 wrote = true;
             }
-            if (wrote) await writer.FlushAsync();
+            if (wrote) await response.Body.FlushAsync(ct);
         }
 
-        // ── Multipart/form-data parser ────────────────────────────────────
-
-        private record MultipartResult(byte[]? FileBytes, Dictionary<string, string> Fields);
-
-        private static MultipartResult ParseMultipart(HttpListenerRequest req)
-        {
-            var ct = req.ContentType ?? "";
-            var bm = Regex.Match(ct, @"boundary=(?:""([^""]+)""|([^\s;]+))", RegexOptions.IgnoreCase);
-            if (!bm.Success)
-                throw new InvalidDataException("multipart/form-data boundary not found in Content-Type.");
-
-            var boundary = "--" + (bm.Groups[1].Success ? bm.Groups[1].Value : bm.Groups[2].Value);
-            var boundaryBytes = Encoding.ASCII.GetBytes(boundary);
-
-            using var ms = new MemoryStream();
-            req.InputStream.CopyTo(ms);
-            var body = ms.ToArray();
-
-            var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            byte[]? file = null;
-
-            var positions = FindAllBytes(body, boundaryBytes);
-
-            for (int p = 0; p < positions.Count - 1; p++)
-            {
-                var start = positions[p] + boundaryBytes.Length;
-                if (start + 1 < body.Length && body[start] == '\r' && body[start + 1] == '\n') start += 2;
-                else if (start < body.Length && body[start] == '\n') start += 1;
-
-                var end = positions[p + 1];
-                if (end >= 2 && body[end - 2] == '\r' && body[end - 1] == '\n') end -= 2;
-                else if (end >= 1 && body[end - 1] == '\n') end -= 1;
-
-                var sepIdx = IndexOfBytes(body, new byte[] { 13, 10, 13, 10 }, start, end - start);
-                if (sepIdx < 0) continue;
-
-                var headerText = Encoding.UTF8.GetString(body, start, sepIdx - start);
-                var bodyStart = sepIdx + 4;
-                var bodyLen = end - bodyStart;
-                if (bodyLen < 0) continue;
-
-                // Extract the field name from Content-Disposition
-                var dispMatch = Regex.Match(headerText,
-                    @"Content-Disposition:[^\r\n]*\bname=""([^""]+)""",
-                    RegexOptions.IgnoreCase);
-                var name = dispMatch.Success ? dispMatch.Groups[1].Value : "";
-
-                bool isFilePart =
-                    Regex.IsMatch(headerText, @"\bfilename=", RegexOptions.IgnoreCase) ||
-                    Regex.IsMatch(headerText, @"Content-Type:\s*application/", RegexOptions.IgnoreCase) ||
-                    name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(name, "file", StringComparison.OrdinalIgnoreCase);
-
-                if (isFilePart && file == null)
-                {
-                    file = new byte[bodyLen];
-                    Array.Copy(body, bodyStart, file, 0, bodyLen);
-                }
-                else if (!string.IsNullOrEmpty(name))
-                {
-                    fields[name] = Encoding.UTF8.GetString(body, bodyStart, bodyLen);
-                }
-            }
-
-            return new MultipartResult(file, fields);
-        }
-
-        private static List<int> FindAllBytes(byte[] haystack, byte[] needle)
-        {
-            var result = new List<int>();
-            for (int i = 0; i <= haystack.Length - needle.Length; i++)
-            {
-                bool ok = true;
-                for (int j = 0; j < needle.Length && ok; j++) ok = haystack[i + j] == needle[j];
-                if (ok) result.Add(i);
-            }
-            return result;
-        }
-
-        private static int IndexOfBytes(byte[] haystack, byte[] needle, int offset, int length)
-        {
-            for (int i = offset; i <= offset + length - needle.Length; i++)
-            {
-                bool ok = true;
-                for (int j = 0; j < needle.Length && ok; j++) ok = haystack[i + j] == needle[j];
-                if (ok) return i;
-            }
-            return -1;
-        }
+        // ── Static helpers ─────────────────────────────────────────────────────
 
         /// <summary>Escape newlines so a log line never breaks an SSE frame.</summary>
         private static string EscapeSseData(string text) =>
             text.Replace("\\", "\\\\").Replace("\r", "").Replace("\n", "\\n");
 
-        // ── Root info ─────────────────────────────────────────────────────
-
-        // ── GET /code ─────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Returns the full contents of Program.cs.
-        /// Resolves path by going up from the executable's bin folder to the
-        /// project root, then reading Program.cs from that directory.
-        /// </summary>
-        private async Task HandleGetCodeAsync(HttpListenerResponse res)
-        {
-            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
-            var projectDir = Path.GetDirectoryName(exeDir)!;   // parent of bin/
-            var filePath = Path.Combine(projectDir, "Program.cs");
-
-            if (!File.Exists(filePath))
-            {
-                res.StatusCode = 404;
-                await WriteJsonAsync(res, new { error = $"Program.cs not found at: {filePath}" });
-                return;
-            }
-
-            await WriteRawAsync(res, await File.ReadAllTextAsync(filePath), "text/plain");
-        }
-
-        // ── GET /csproj ───────────────────────────────────────────────────
-
-        /// <summary>
-        /// Returns the full contents of the project's .csproj file.
-        /// Resolves path by going up from the executable's bin folder to the
-        /// project root, then finding the first .csproj in that directory.
-        /// </summary>
-        private async Task HandleGetCsprojAsync(HttpListenerResponse res)
-        {
-            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
-            var projectDir = Path.GetDirectoryName(exeDir)!;   // parent of bin/
-            var csprojFiles = Directory.GetFiles(projectDir, "*.csproj");
-
-            if (csprojFiles.Length == 0)
-            {
-                res.StatusCode = 404;
-                await WriteJsonAsync(res, new { error = $"No .csproj file found in: {projectDir}" });
-                return;
-            }
-
-            await WriteRawAsync(res, await File.ReadAllTextAsync(csprojFiles[0]), "text/plain");
-        }
-
-        // ── GET /apidocs ──────────────────────────────────────────────────
-
-        /// <summary>
-        /// Returns the full contents of API.md located next to the executable.
-        /// </summary>
-        private async Task HandleGetApiDocsAsync(HttpListenerResponse res)
-        {
-            var exeDir = Path.GetDirectoryName(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location));
-            var filePath = Path.Combine(exeDir, "API.md");
-
-            if (!File.Exists(filePath))
-            {
-                res.StatusCode = 404;
-                await WriteJsonAsync(res, new { error = $"API.md not found at: {filePath}" });
-                return;
-            }
-
-            await WriteRawAsync(res, await File.ReadAllTextAsync(filePath), "text/markdown");
-        }
-
-        // ── GET /readmedocs ───────────────────────────────────────────────
-
-        /// <summary>
-        /// Returns the full contents of README.md located next to the executable.
-        /// </summary>
-        private async Task HandleGetReadmeDocsAsync(HttpListenerResponse res)
-        {
-            var exeDir = Path.GetDirectoryName(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location));
-            var filePath = Path.Combine(exeDir, "README.md");
-
-            if (!File.Exists(filePath))
-            {
-                res.StatusCode = 404;
-                await WriteJsonAsync(res, new { error = $"README.md not found at: {filePath}" });
-                return;
-            }
-
-            await WriteRawAsync(res, await File.ReadAllTextAsync(filePath), "text/markdown");
-        }
+        // ── Root info ──────────────────────────────────────────────────────────
 
         private object RootInfo() => new
         {
@@ -2782,22 +2773,22 @@ namespace UnitySceneGen
             defaultUnityExePath = AppSettings.DefaultUnityExePath,
             endpoints = new[]
             {
-                $"GET  /schema        — component + template catalog",
-                $"GET  /status        — live job status",
-                $"GET  /swagger       — Swagger UI",
-                $"GET  /openapi.json  — OpenAPI 3.0 spec",
-                $"GET  /code          — return the full text of Program.cs (main application code)",
-                $"GET  /csproj        — return the full text of the project .csproj file",
-                $"GET  /apidocs       — return the full text of API.md (API reference documentation)",
-                $"GET  /readmedocs    — return the full text of README.md (internal architecture documentation)",
-                $"POST /validate         — validate scene.zip without Unity (< 1 s)",
-                $"POST /generate         — generate Unity project from scene.zip (JSON/base64), returns .zip",
-                $"POST /generate/upload  — upload scene.zip (multipart/form-data), streams SSE logs + result",
-                $"POST /build            — WebGL build from generated project .zip",
+                "GET  /schema           — component + template catalog",
+                "GET  /status           — live job status",
+                "GET  /swagger          — Swagger UI",
+                "GET  /openapi.json     — OpenAPI 3.0 spec",
+                "GET  /code             — return the full text of Program.cs",
+                "GET  /csproj           — return the full text of the project .csproj file",
+                "GET  /apidocs          — return the full text of API.md",
+                "GET  /readmedocs       — return the full text of README.md",
+                "POST /validate         — validate scene.zip without Unity (< 1 s)",
+                "POST /generate         — generate Unity project from scene.zip (JSON/base64)",
+                "POST /generate/upload  — upload scene.zip (multipart/form-data), streams SSE",
+                "POST /build            — WebGL build from generated project .zip",
             },
         };
 
-        // ── Swagger UI ────────────────────────────────────────────────────
+        // ── Swagger UI ─────────────────────────────────────────────────────────
 
         private string SwaggerUiHtml() => $$"""
 <!DOCTYPE html>
@@ -2825,7 +2816,7 @@ namespace UnitySceneGen
 </html>
 """;
 
-        // ── OpenAPI spec ──────────────────────────────────────────────────
+        // ── OpenAPI spec ───────────────────────────────────────────────────────
 
         private string OpenApiSpec()
         {
@@ -2842,10 +2833,10 @@ namespace UnitySceneGen
   "paths": {
     "/schema":   { "get":  { "summary": "Component and template catalog", "operationId": "getSchema",   "responses": { "200": { "description": "Schema" } } } },
     "/status":   { "get":  { "summary": "Live job status",                "operationId": "getStatus",   "responses": { "200": { "description": "Status" } } } },
-    "/code":        { "get":  { "summary": "Return the full text of Program.cs", "operationId": "getCode", "responses": { "200": { "description": "Plain text of Program.cs" }, "404": { "description": "File not found" } } } },
-    "/csproj":      { "get":  { "summary": "Return the full text of the project .csproj file", "operationId": "getCsproj", "responses": { "200": { "description": "Plain text of the .csproj file" }, "404": { "description": "File not found" } } } },
-    "/apidocs":     { "get":  { "summary": "Return the full text of API.md", "operationId": "getApiDocs", "responses": { "200": { "description": "Markdown text of API.md" }, "404": { "description": "File not found" } } } },
-    "/readmedocs":  { "get":  { "summary": "Return the full text of README.md", "operationId": "getReadmeDocs", "responses": { "200": { "description": "Markdown text of README.md" }, "404": { "description": "File not found" } } } },
+    "/code":        { "get":  { "summary": "Return the full text of Program.cs",           "operationId": "getCode",       "responses": { "200": { "description": "Plain text" }, "404": { "description": "Not found" } } } },
+    "/csproj":      { "get":  { "summary": "Return the full text of the .csproj file",     "operationId": "getCsproj",     "responses": { "200": { "description": "Plain text" }, "404": { "description": "Not found" } } } },
+    "/apidocs":     { "get":  { "summary": "Return the full text of API.md",               "operationId": "getApiDocs",    "responses": { "200": { "description": "Markdown"   }, "404": { "description": "Not found" } } } },
+    "/readmedocs":  { "get":  { "summary": "Return the full text of README.md",            "operationId": "getReadmeDocs", "responses": { "200": { "description": "Markdown"   }, "404": { "description": "Not found" } } } },
     "/validate": { "post": { "summary": "Validate scene.zip without Unity", "operationId": "validate",
       "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ZipRequest" } } } },
       "responses": { "200": { "description": "Valid" }, "422": { "description": "Invalid" }, "400": { "description": "Bad request" } }
@@ -2856,14 +2847,14 @@ namespace UnitySceneGen
       "description": "Accepts multipart/form-data with a file field containing scene.zip.\n\nResponse is a Server-Sent Events (SSE) stream.\n\n**Event types:**\n- `data:` lines — real-time log output\n- `event: result` — job finished, payload has zipBase64\n- `event: error` — job failed, payload has error details",
       "requestBody": { "required": true, "content": { "multipart/form-data": { "schema": { "$ref": "#/components/schemas/UploadRequest" } } } },
       "responses": {
-        "200": { "description": "SSE stream of logs then final result event", "content": { "text/event-stream": { "schema": { "type": "string" } } } },
+        "200": { "description": "SSE stream", "content": { "text/event-stream": { "schema": { "type": "string" } } } },
         "400": { "description": "Bad request" },
-        "503": { "description": "Busy — another job is running" }
+        "503": { "description": "Busy" }
       }
     } },
     "/generate": { "post": { "summary": "Generate Unity project from scene.zip (JSON body with base64)", "operationId": "generate",
       "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenerateRequest" } } } },
-      "responses": { "200": { "description": "Unity project zip", "content": { "application/zip": {} } }, "400": { "description": "Bad request" }, "422": { "description": "Failed" }, "503": { "description": "Busy" } }
+      "responses": { "200": { "description": "SSE stream" }, "400": { "description": "Bad request" }, "503": { "description": "Busy" } }
     } }
   },
   "components": {
@@ -2895,24 +2886,10 @@ namespace UnitySceneGen
 }
 """;
         }
-
-        // ── Helpers ───────────────────────────────────────────────────────
-
-        private static async Task WriteJsonAsync(HttpListenerResponse res, object obj)
-            => await WriteRawAsync(res, JsonSerializer.Serialize(obj, Json.Pretty), "application/json");
-
-        private static async Task WriteRawAsync(HttpListenerResponse res, string text, string contentType)
-        {
-            var bytes = Encoding.UTF8.GetBytes(text);
-            res.ContentType = $"{contentType}; charset=utf-8";
-            res.ContentLength64 = bytes.Length;
-            await res.OutputStream.WriteAsync(bytes);
-            res.OutputStream.Close();
-        }
     }
 
 
-    // ═══════════════════════════════════════════════════════════════════════════
+
     // SECTION 11 — MAIN WINDOW (WPF GUI)
     // ═══════════════════════════════════════════════════════════════════════════
 
