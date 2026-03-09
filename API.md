@@ -9,60 +9,50 @@
 ## Quick-Start Workflow
 
 ```
-1.  GET  /schema          → fetch the component + template catalog (optional but useful)
+1.  GET  /schema          → fetch the component + template catalog (once per session)
 2.  Build your scene.zip  → scene.json + optional scripts/ folder
-3.  POST /validate        → fast structural check (< 1s, no Unity required)
+3.  POST /validate        → fast structural check (< 1 s, no Unity required)
 4.  POST /generate        → full pipeline with real-time SSE log stream (5–20 min)
        OR
     POST /generate/upload → same pipeline via multipart file upload + SSE
 5.  Receive the result event from the SSE stream → extract zipBase64
-```
-
-To inspect the running application's source files at any time:
-```
-GET /code    → returns the full text of Program.cs (main application code)
-GET /csproj  → returns the full text of the project .csproj (build configuration)
-```
-
-If you already have a generated Unity project and only want a WebGL build:
-```
-4b. POST /build           → WebGL build + optional GCS upload
+    Poll GET /status at any time to check progress or review accumulated logs
 ```
 
 ---
 
 ## Endpoints
 
-### `GET /`
-
-Returns a summary of the service and all available endpoints.
-
-**Response `200`:**
-```json
-{
-  "service": "UnitySceneGen API",
-  "version": "2.0.0",
-  "port": 46001,
-  "defaultUnityExePath": "C:\\Program Files\\Unity\\Hub\\Editor\\6000.0.3f1\\Editor\\Unity.exe",
-  "endpoints": [ "..." ]
-}
-```
-
----
-
 ### `GET /schema`
 
-Returns the complete catalog of supported Unity component types and built-in templates. Use this to understand what component types and props are valid before building `scene.json`.
+Returns the complete machine-readable catalog of supported Unity component types, built-in templates, prop formats, ID conventions, and the `scene.zip` input contract. **Fetch this once per session before building `scene.json`** — it contains everything an LLM needs to generate valid configs.
 
-**Response `200`:** JSON object with `components` and `templates` keys.
+**Response `200`** — `application/json`
+
+Top-level keys:
+
+| Key | Description |
+|---|---|
+| `version` | Schema version string (e.g. `"2.0"`) |
+| `usage` | Recommended workflow steps and summary |
+| `inputContract` | Full `scene.zip` structure, rules, field definitions, and a worked example |
+| `propFormats` | How to encode Color, Vector2/3/4, ref, enum, float, int, bool, string values |
+| `idConvention` | Dot-notation ID naming rule with examples |
+| `builtinTags` | Unity built-in tag names (no declaration needed in `settings.tags`) |
+| `builtinLayers` | Unity built-in layer names (no declaration needed in `settings.layers`) |
+| `templates` | `{ usage: string[], builtins: { [name]: { description, propMappings, componentTypes } } }` |
+| `components` | `{ [UnityEngine.TypeName]: { notes: string[], props: { [propName]: { type, default, range?, values?, notes? } } } }` |
+
+> The `templates.builtins` and `components` objects are the primary reference for building `scene.json`. Always prefer `/schema` over hardcoded assumptions — the catalog is authoritative.
 
 ---
 
 ### `GET /status`
 
-Returns a snapshot of the currently running (or last completed) job. Safe to call at any time, including while a job is running.
+Returns a snapshot of the currently running (or last completed) job. Safe to call at any time, including while a job is running. Use this to poll progress while `/generate` or `/generate/upload` is streaming.
 
-**Response `200`:**
+**Response `200`** — `application/json`
+
 ```json
 {
   "running": true,
@@ -84,41 +74,7 @@ Returns a snapshot of the currently running (or last completed) job. Safe to cal
 | `error` | string | Non-empty if the last job failed |
 | `log` | string[] | All log lines accumulated since the job started |
 
-> **Note:** `/status` accumulates all log lines for the lifetime of the job. Use the SSE stream on `/generate` or `/generate/upload` for real-time delivery.
-
----
-
-### `GET /code`
-
-Returns the full text of `Program.cs` — the main application source file.
-
-The server resolves the path at runtime by locating the running executable, stepping up to the parent of the `bin` folder, and reading `Program.cs` from that directory. This means the endpoint always returns the exact source that was compiled into the running binary.
-
-**Purpose:** Exposes the underlying application code so callers (LLMs, automation scripts, debugging tools) can inspect the full implementation without needing filesystem access to the host machine.
-
-**Response `200`** (`text/plain`): Full UTF-8 contents of `Program.cs`.
-
-**Response `404`** (`application/json`): Returned if `Program.cs` cannot be located (e.g. deployed without source files).
-```json
-{ "error": "Program.cs not found at: C:\\MyApp\\Program.cs" }
-```
-
----
-
-### `GET /csproj`
-
-Returns the full text of the project's `.csproj` file — the MSBuild project configuration.
-
-The server resolves the path the same way as `/code`: it steps up from the executable's `bin` folder to the project root and returns the first `.csproj` file found there.
-
-**Purpose:** Exposes the project configuration and build settings (target framework, NuGet package references, build properties, etc.) so callers can inspect the project's dependencies and structure without filesystem access to the host machine.
-
-**Response `200`** (`text/plain`): Full UTF-8 contents of the `.csproj` file.
-
-**Response `404`** (`application/json`): Returned if no `.csproj` file is found in the resolved project directory.
-```json
-{ "error": "No .csproj file found in: C:\\MyApp" }
-```
+> `/status` accumulates all log lines for the lifetime of the job. Use the SSE stream on `/generate` or `/generate/upload` for real-time line-by-line delivery.
 
 ---
 
@@ -126,7 +82,8 @@ The server resolves the path the same way as `/code`: it steps up from the execu
 
 Validates a `scene.zip` without invoking Unity. Runs steps 1–3 of the pipeline (extract → resolve templates → validate config). Completes in under one second. Call this before `/generate` to catch structural errors cheaply.
 
-**Request body** (`application/json`):
+**Request body** — `application/json`
+
 ```json
 {
   "sceneZipBase64": "<base64-encoded scene.zip>"
@@ -154,11 +111,14 @@ Validates a `scene.zip` without invoking Unity. Runs steps 1–3 of the pipeline
 }
 ```
 
-**Response `400`** — bad request (missing field, bad base64, malformed JSON).
+**Response `400`** — bad request (missing field, bad base64, or malformed JSON):
+```json
+{ "error": "sceneZipBase64 is required." }
+```
 
 ---
 
-### `POST /generate`  ← **Primary endpoint. Streams logs via SSE.**
+### `POST /generate`  ← **Primary generation endpoint. Streams logs via SSE.**
 
 Runs the full 6-step pipeline. The response is a **Server-Sent Events (SSE) stream** that delivers every log line in real time, then terminates with either a `result` or `error` event.
 
@@ -344,106 +304,11 @@ Same full pipeline as `/generate`, but accepts the ZIP as a **multipart/form-dat
 
 ---
 
-### `POST /build`
-
-Builds an already-generated Unity project to WebGL and optionally uploads it to Google Cloud Storage. This endpoint expects a **Unity project ZIP** (not a `scene.zip`).
-
-**Content-Type:** `application/json`
-
-```json
-{
-  "projectZipBase64": "<base64-encoded Unity project .zip>",
-  "projectName":      "MyProject",
-  "unityExePath":     "C:\\...\\Unity.exe",
-  "gcsBucket":        "my-gcs-bucket",
-  "gcsKeyJson":       "<base64-encoded GCS service account key JSON>",
-  "development":      false
-}
-```
-
-| Field | Required | Default | Description |
-|---|---|---|---|
-| `projectZipBase64` | ✅ | — | Base64-encoded Unity project ZIP |
-| `projectName` | ✅ | — | Name of the folder inside the ZIP that is the Unity project root |
-| `unityExePath` | ❌ | default path | Path to Unity executable |
-| `gcsBucket` | ❌ | `"aqe-unity-builds"` | GCS bucket name for upload |
-| `gcsKeyJson` | ❌ | — | Base64-encoded GCS service account JSON key; omit to skip upload |
-| `development` | ❌ | `false` | Development build flag |
-
-**Response `200`** (blocking — waits for full build):
-```json
-{
-  "success": true,
-  "url": "https://storage.googleapis.com/my-bucket/MyProject/index.html",
-  "buildPath": "C:\\Temp\\UnityBuild_abc123\\MyProject",
-  "log": [ "..." ],
-  "warnings": []
-}
-```
-
-**Response `422`** on Unity failure — includes `log[]` for diagnosis.
-
-**Response `503`** if another job is already running.
-
-> **Note:** Unlike `/generate`, the `/build` endpoint is blocking — it holds the HTTP connection open for the duration of the Unity build. Monitor progress via `GET /status` in parallel.
-
----
-
-## Log Line Reference
-
-Every log line emitted during SSE streaming follows these conventions. Lines prefixed with `[ERROR]` or `[WARN]` are always **UPPER CASE** — scan for these to detect problems quickly.
-
-| Pattern | Severity | Meaning |
-|---|---|---|
-| `=== Step N/6: ... ===` | Info | Pipeline stage marker. 6 steps total. |
-| `[ZipLoader] Extracting ...` | Info | ZIP is being extracted to temp dir |
-| `[ZipLoader]   script ← Name.cs` | Info | A script file was discovered in `scripts/` |
-| `[ZipLoader]   ⚠ duplicate script name ...` | Info | Duplicate script skipped |
-| `[ProjectCreator] Creating project at ...` | Info | New Unity project folder is being scaffolded |
-| `[ProjectCreator] Reusing existing project at ...` | Info | Project folder already exists; reusing it |
-| `[ProjectCreator] Builder.cs → ...` | Info | Builder script written to project |
-| `[Unity Pass 1] Starting ...` | Info | Unity is being launched for package import + compile |
-| `[Unity Pass 2] Starting ...` | Info | Unity is being launched for scene generation |
-| `[Unity] PID <n> started.` | Info | Unity process PID |
-| `  [Unity] <line>` | Info | Raw line tailed from Unity's log file |
-| `  ✓  ...` | Success | Step completed successfully |
-| `  [WARN] <MESSAGE IN CAPS>` | Warning | Non-fatal. Pipeline continues. |
-| `[ERROR] <MESSAGE IN CAPS>` | Error | Fatal. Pipeline will abort after this line. The final `event: error` SSE event follows. |
-| `[ERROR] UNITY TIMEOUT AFTER N MIN ...` | Error | Unity did not complete within the time limit |
-| `[ERROR] UNITY PRODUCED NO LOG OUTPUT FOR Ns ...` | Error | Unity appears hung (license issue, crash, dialog) |
-| `[ERROR] UNITY LOG CONTAINS FAILURE PATTERN: '...'` | Error | A known failure string was found in Unity's log |
-
-### Step markers and their meaning
-
-```
-=== Step 1/6: Loading scene zip ===
-    Extracting ZIP, parsing scene.json, discovering scripts/.
-
-=== Step 2/6: Resolving templates ===
-    Expanding "template" shorthands into full component lists.
-
-=== Step 3/6: Validating config ===
-    Structural validation. Errors here abort before touching disk.
-
-=== Step 4/6: Setting up project folder ===
-    Creating Unity project directory structure, writing config files.
-
-=== Step 5/6: Unity Pass 1 — Package import & compile ===
-    Unity imports packages and compiles scripts. Longest step.
-    Typical duration: 3–10 min on first run, 30s on re-run.
-
-=== Step 6/6: Unity Pass 2 — Scene generation ===
-    Unity runs Builder.Run, creates scene files.
-    Typical duration: 1–3 min.
-```
-
----
-
 ## Concurrency and Busy Handling
 
 Only one job can run at a time. Both the GUI and the API share a single processing slot.
 
-If you call `/generate`, `/generate/upload`, or `/build` while another job is running, you will receive:
+If you call `/generate` or `/generate/upload` while another job is running, you will receive:
 
 **HTTP 503:**
 ```json
@@ -538,7 +403,7 @@ scene.zip
 - `template` and `components` can coexist. Explicit `components` always win over template defaults.
 - Custom component types (e.g. `"PlayerController"`) must have a matching `PlayerController.cs` in `scripts/`.
 - Tags and layers that are not Unity built-ins must be declared in `settings.tags` / `settings.layers`.
-- Prop values that start with `#` must be 9-character hex colors: `#RRGGBBAA`.
+- Prop values that start with `#` must be 9-character hex colors (`#` + 8 hex digits): `#RRGGBBAA`.
 - Prop values that start with `ref:` are GameObject ID references: `"ref:player"`.
 - Array props must have 2 (Vector2), 3 (Vector3), or 4 (Vector4) numeric elements.
 
@@ -557,22 +422,55 @@ Use these in `"template"` to avoid declaring common component combinations manua
 | `physics/trigger` | BoxCollider (isTrigger=true) | `size`, `center` |
 | `audio/source` | AudioSource | `volume`, `loop`, `playOnAwake`, `spatialBlend` |
 
-Call `GET /schema` to get the full list with all available `propMappings` for each template.
+Call `GET /schema` to get the authoritative list with all `propMappings` and `componentTypes` for each template.
 
 ---
 
-## Swagger UI
+## Log Line Reference
 
-A live interactive Swagger UI is available while the server is running:
+Every log line emitted during SSE streaming follows these conventions. Lines prefixed with `[ERROR]` or `[WARN]` are always **UPPER CASE** — scan for these to detect problems quickly.
+
+| Pattern | Severity | Meaning |
+|---|---|---|
+| `=== Step N/6: ... ===` | Info | Pipeline stage marker. 6 steps total. |
+| `[ZipLoader] Extracting ...` | Info | ZIP is being extracted to temp dir |
+| `[ZipLoader]   script ← Name.cs` | Info | A script file was discovered in `scripts/` |
+| `[ZipLoader]   ⚠ duplicate script name ...` | Info | Duplicate script skipped |
+| `[ProjectCreator] Creating project at ...` | Info | New Unity project folder is being scaffolded |
+| `[ProjectCreator] Reusing existing project at ...` | Info | Project folder already exists; reusing it |
+| `[Unity Pass 1] Starting ...` | Info | Unity is being launched for package import + compile |
+| `[Unity Pass 2] Starting ...` | Info | Unity is being launched for scene generation |
+| `[Unity] PID <n> started.` | Info | Unity process PID |
+| `  [Unity] <line>` | Info | Raw line tailed from Unity's log file |
+| `  ✓  ...` | Success | Step completed successfully |
+| `  [WARN] <MESSAGE IN CAPS>` | Warning | Non-fatal. Pipeline continues. |
+| `[ERROR] <MESSAGE IN CAPS>` | Error | Fatal. Pipeline will abort after this line. The final `event: error` SSE event follows. |
+| `[ERROR] UNITY TIMEOUT AFTER N MIN ...` | Error | Unity did not complete within the time limit |
+| `[ERROR] UNITY PRODUCED NO LOG OUTPUT FOR Ns ...` | Error | Unity appears hung (license issue, crash, dialog) |
+| `[ERROR] UNITY LOG CONTAINS FAILURE PATTERN: '...'` | Error | A known failure string was found in Unity's log |
+
+### Step markers and their meaning
 
 ```
-http://localhost:46001/swagger
-```
+=== Step 1/6: Loading scene zip ===
+    Extracting ZIP, parsing scene.json, discovering scripts/.
 
-The underlying OpenAPI 3.0 spec is at:
+=== Step 2/6: Resolving templates ===
+    Expanding "template" shorthands into full component lists.
 
-```
-http://localhost:46001/openapi.json
+=== Step 3/6: Validating config ===
+    Structural validation. Errors here abort before touching disk.
+
+=== Step 4/6: Setting up project folder ===
+    Creating Unity project directory structure, writing config files.
+
+=== Step 5/6: Unity Pass 1 — Package import & compile ===
+    Unity imports packages and compiles scripts. Longest step.
+    Typical duration: 3–10 min on first run, 30 s on re-run.
+
+=== Step 6/6: Unity Pass 2 — Scene generation ===
+    Unity runs Builder.Run, creates scene files.
+    Typical duration: 1–3 min.
 ```
 
 ---
