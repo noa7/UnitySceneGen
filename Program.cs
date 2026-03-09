@@ -2741,7 +2741,7 @@ namespace UnitySceneGen
         /// </summary>
         private async Task HandleGetApiDocsAsync(HttpListenerResponse res)
         {
-            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+            var exeDir = Path.GetDirectoryName(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location));
             var filePath = Path.Combine(exeDir, "API.md");
 
             if (!File.Exists(filePath))
@@ -2761,7 +2761,7 @@ namespace UnitySceneGen
         /// </summary>
         private async Task HandleGetReadmeDocsAsync(HttpListenerResponse res)
         {
-            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+            var exeDir = Path.GetDirectoryName(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location));
             var filePath = Path.Combine(exeDir, "README.md");
 
             if (!File.Exists(filePath))
