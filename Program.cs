@@ -2838,7 +2838,7 @@ namespace UnitySceneGen
     "version": "2.0.0",
     "description": "Generate a complete Unity project from a scene.zip.\n\n**Input:** Base64-encoded scene.zip containing scene.json + optional scripts/ folder.\n**Output:** Unity project .zip.\n\n**Workflow:**\n1. GET /schema - fetch catalog\n2. Build scene.zip\n3. POST /validate - validate cheaply\n4. POST /generate - run full pipeline (5-20 min)\n5. GET /status - poll progress\n\n**Default Unity path:** {{unityPath}}"
   },
-  "servers": [{ "url": "http://localhost:{{_port}}" }],
+  "servers": [{ "url": "" }],
   "paths": {
     "/schema":   { "get":  { "summary": "Component and template catalog", "operationId": "getSchema",   "responses": { "200": { "description": "Schema" } } } },
     "/status":   { "get":  { "summary": "Live job status",                "operationId": "getStatus",   "responses": { "200": { "description": "Status" } } } },
